@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    
+    <!-- Required permissions -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.USE_BIOMETRIC" />
+    <uses-permission android:name="android.permission.USE_FINGERPRINT" />
+    
+    <!-- Optional permissions -->
+    <uses-permission android:name="android.permission.USE_FACE_AUTHENTICATION" />
+    <uses-permission android:name="android.permission.USE_IRIS_AUTHENTICATION" />
+    
+</manifest>
