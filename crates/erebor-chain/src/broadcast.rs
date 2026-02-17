@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use thiserror::Error;
-use tokio::time::{Duration, Instant};
-use tracing::{debug, warn, error};
+use tokio::time::Instant;
+use tracing::{debug, warn};
 
-use crate::rpc::{RpcError, RpcPool, RpcClient};
+use crate::rpc::{RpcError, RpcPool};
 use crate::tx::SignedTransaction;
 
 #[derive(Error, Debug)]
@@ -23,16 +23,23 @@ pub enum BroadcastError {
 /// A unique transaction hash.
 pub type TxHash = String;
 
+/// On-chain receipt status.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ReceiptStatus {
+    Success,
+    Reverted,
+}
+
 /// Receipt for a mined transaction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TransactionReceipt {
     pub tx_hash: TxHash,
     pub block_number: u64,
     pub gas_used: u64,
-    pub status: TransactionStatus,
+    pub status: ReceiptStatus,
 }
 
-/// Status of a transaction.
+/// Status of a transaction (lifecycle).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TransactionStatus {
     Pending,
@@ -42,11 +49,11 @@ pub enum TransactionStatus {
 
 /// Tracks a pending transaction with metadata.
 #[derive(Debug, Clone)]
-struct PendingTransaction {
-    tx_hash: TxHash,
-    submitted_at: Instant,
-    chain_id: u64,
-    last_checked: Option<Instant>,
+pub struct PendingTransaction {
+    pub tx_hash: TxHash,
+    pub submitted_at: Instant,
+    pub chain_id: u64,
+    pub last_checked: Option<Instant>,
 }
 
 /// Trait for broadcasting signed transactions.
@@ -158,14 +165,9 @@ impl EvmBroadcaster {
             block_number,
             gas_used,
             status: if is_success {
-                TransactionStatus::Confirmed(TransactionReceipt {
-                    tx_hash: tx_hash.clone(),
-                    block_number,
-                    gas_used,
-                    status: TransactionStatus::Pending, // Placeholder to avoid recursion
-                })
+                ReceiptStatus::Success
             } else {
-                TransactionStatus::Failed("Transaction reverted".into())
+                ReceiptStatus::Reverted
             },
         };
 
@@ -250,7 +252,7 @@ impl Broadcaster for EvmBroadcaster {
             tx_hash,
             receipt.block_number,
             receipt.gas_used,
-            matches!(receipt.status, TransactionStatus::Confirmed(_))
+            matches!(receipt.status, ReceiptStatus::Success)
         );
 
         // Remove from pending tracking since we have a receipt
@@ -349,7 +351,7 @@ mod tests {
         assert_eq!(receipt.tx_hash, "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
         assert_eq!(receipt.block_number, 16);
         assert_eq!(receipt.gas_used, 21000);
-        assert!(matches!(receipt.status, TransactionStatus::Confirmed(_)));
+        assert!(matches!(receipt.status, ReceiptStatus::Success));
     }
 
     #[test]
@@ -365,7 +367,7 @@ mod tests {
         let receipt = broadcaster.parse_receipt(receipt_json).unwrap();
         assert_eq!(receipt.block_number, 32);
         assert_eq!(receipt.gas_used, 30000);
-        assert!(matches!(receipt.status, TransactionStatus::Failed(_)));
+        assert!(matches!(receipt.status, ReceiptStatus::Reverted));
     }
 
     #[test]

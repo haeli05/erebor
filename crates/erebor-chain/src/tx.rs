@@ -11,6 +11,10 @@ use crate::rpc::{RpcClient, RpcError};
 pub enum TxError {
     #[error("RPC error: {0}")]
     Rpc(#[from] RpcError),
+    #[error("Chain error: {0}")]
+    Chain(#[from] crate::chains::ChainError),
+    #[error("Gas error: {0}")]
+    Gas(#[from] crate::gas::GasError),
     #[error("invalid parameter: {0}")]
     InvalidParameter(String),
     #[error("encoding error: {0}")]

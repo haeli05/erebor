@@ -20,7 +20,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use crate::broadcast::BroadcastError;
-use crate::signer::SignerError;
 use crate::tx::TxError;
 
 /// Top-level chain service — wires together registry, RPC pools, and gas estimation.
@@ -97,17 +96,23 @@ impl ChainService {
         chain_id: u64,
         request: &tx::TransactionRequest,
     ) -> Result<GasEstimate, TxError> {
-        let config = self.registry.get_chain(chain_id)
-            .map_err(|e| TxError::InvalidParameter(format!("unknown chain {chain_id}: {e}")))?;
-        
+        let config = self.registry.get_chain(chain_id)?;
         let pool = self.get_pool(chain_id)?;
+        
+        // Convert tx::TransactionRequest to gas::TransactionRequest
+        let gas_request = gas::TransactionRequest {
+            from: None, // Gas estimation doesn't need from address
+            to: request.to.clone(),
+            value: request.value,
+            data: request.data.clone(),
+        };
         
         if config.supports_eip1559 {
             let oracle = gas::Eip1559GasOracle::new();
-            self.gas_estimator.estimate(&pool, &oracle, Some(request)).await
+            self.gas_estimator.estimate(&pool, &oracle, Some(&gas_request)).await.map_err(Into::into)
         } else {
             let oracle = gas::LegacyGasOracle;
-            self.gas_estimator.estimate(&pool, &oracle, Some(request)).await
+            self.gas_estimator.estimate(&pool, &oracle, Some(&gas_request)).await.map_err(Into::into)
         }
     }
 
@@ -152,7 +157,7 @@ impl ChainService {
         tx_hash: &TxHash,
     ) -> Result<TransactionStatus, BroadcastError> {
         match self.evm_broadcaster.get_receipt(tx_hash).await? {
-            Some(receipt) => Ok(receipt.status),
+            Some(receipt) => Ok(TransactionStatus::Confirmed(receipt)),
             None => Ok(TransactionStatus::Pending),
         }
     }

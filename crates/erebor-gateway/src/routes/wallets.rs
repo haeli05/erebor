@@ -4,8 +4,7 @@ use axum::{
     Json, Router
 };
 use crate::auth::RequireAuth;
-use erebor_common::{EreborError, UserId};
-use erebor_vault::WalletInfo;
+use erebor_common::EreborError;
 use serde::{Deserialize, Serialize};
 use crate::state::AppState;
 use crate::error::{ApiError, ApiResult};
@@ -105,7 +104,7 @@ pub async fn create_wallet(
 /// GET /wallets — List user's wallets
 pub async fn list_wallets(
     State(_state): State<AppState>,
-    RequireAuth(user_id): RequireAuth,
+    RequireAuth(_user_id): RequireAuth,
 ) -> ApiResult<Json<WalletListResponse>> {
     // For this MVP, we assume one wallet per user
     // In a real implementation, you'd query the vault store for all user wallets

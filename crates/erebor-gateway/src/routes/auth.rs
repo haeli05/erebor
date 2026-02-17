@@ -1,12 +1,11 @@
 use axum::{
     extract::{Path, State},
-    http::StatusCode,
     routing::{delete, get, post},
     Json, Router
 };
 use erebor_auth::{
     deterministic_user_id,
-    providers::SiweMessage
+    providers::{SiweMessage, AuthProviderHandler}
 };
 use erebor_common::{AuthProvider, EreborError, UserId};
 use serde::{Deserialize, Serialize};
@@ -99,7 +98,7 @@ async fn issue_tokens_and_respond(
         .sessions
         .create_session(user_id, providers.clone())
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     let access_token = state
         .jwt
@@ -131,7 +130,7 @@ pub async fn google_auth(
     let provider_user = google
         .authenticate(&req.code)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     let user_id = deterministic_user_id(&AuthProvider::Google, &provider_user.provider_user_id);
 
@@ -145,7 +144,7 @@ pub async fn google_auth(
             provider_user.email,
         )
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     issue_tokens_and_respond(&state, &user_id, vec!["google".into()]).await
 }
@@ -160,7 +159,7 @@ pub async fn send_otp(
         .email_otp
         .send_otp(&req.email)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     Ok(Json(MessageResponse {
         message: "OTP sent".into(),
@@ -178,7 +177,7 @@ pub async fn verify_otp(
         .email_otp
         .verify_otp(&req.email, &req.code)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     let user_id = deterministic_user_id(&AuthProvider::Email, &provider_user.provider_user_id);
 
@@ -191,7 +190,7 @@ pub async fn verify_otp(
             provider_user.email,
         )
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     issue_tokens_and_respond(&state, &user_id, vec!["email".into()]).await
 }
@@ -200,7 +199,7 @@ pub async fn verify_otp(
 pub async fn siwe_nonce(
     State(state): State<AppState>,
 ) -> ApiResult<Json<NonceResponse>> {
-    let nonce = state.providers.siwe.generate_nonce();
+    let nonce = state.providers.siwe.generate_nonce().await;
     Ok(Json(NonceResponse { nonce }))
 }
 
@@ -214,7 +213,7 @@ pub async fn siwe_verify(
         .siwe
         .verify(&req.message, &req.signature)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     let user_id = deterministic_user_id(&AuthProvider::Siwe, &provider_user.provider_user_id);
 
@@ -227,7 +226,7 @@ pub async fn siwe_verify(
             None,
         )
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     issue_tokens_and_respond(&state, &user_id, vec!["siwe".into()]).await
 }
@@ -241,7 +240,7 @@ pub async fn refresh(
         .sessions
         .refresh_session(&req.refresh_token)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     let access_token = state
         .jwt
@@ -257,7 +256,7 @@ pub async fn refresh(
 
 /// POST /auth/logout — Revoke session
 pub async fn logout(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
 ) -> ApiResult<Json<MessageResponse>> {
     // Note: In a production system, we'd revoke the specific session
@@ -279,7 +278,7 @@ pub async fn me(
         .linking
         .get_linked_identities(&user_id)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     let providers: Vec<String> = links
         .iter()
@@ -330,7 +329,7 @@ pub async fn link_provider(
             req.email,
         )
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     Ok(Json(MessageResponse {
         message: "Identity linked".into(),

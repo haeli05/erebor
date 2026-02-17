@@ -1,5 +1,5 @@
 use k256::ecdsa::{signature::Signer, Signature, SigningKey};
-use rlp::{Encodable, RlpStream};
+use rlp::RlpStream;
 use tiny_keccak::{Hasher, Keccak};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 use thiserror::Error;

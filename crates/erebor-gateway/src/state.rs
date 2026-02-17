@@ -13,8 +13,8 @@ use erebor_common::{SecretBytes, EreborError, Result};
 #[derive(Clone)]
 pub struct AppState {
     pub jwt: Arc<JwtManager>,
-    pub sessions: Arc<SessionManager<InMemorySessionStore>>,
-    pub linking: Arc<LinkingManager<InMemoryLinkingStore>>,
+    pub sessions: Arc<SessionManager>,
+    pub linking: Arc<LinkingManager>,
     pub providers: Arc<ProviderRegistry>,
     pub vault: Arc<VaultService<InMemoryStore>>,
     pub chain: Arc<ChainService>,
