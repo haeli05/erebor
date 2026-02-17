@@ -1,0 +1,22 @@
+[package]
+name = "erebor-vault"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+erebor-common = { path = "../erebor-common" }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+k256 = { workspace = true }
+aes-gcm = { workspace = true }
+sha2 = { workspace = true }
+hkdf = { workspace = true }
+rand = { workspace = true }
+zeroize = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+vsss-rs = { workspace = true }
