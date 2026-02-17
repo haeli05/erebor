@@ -20,3 +20,9 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
 vsss-rs = { workspace = true }
+hmac = "0.12"
+tiny-keccak = { version = "2", features = ["keccak"] }
+ed25519-dalek = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }

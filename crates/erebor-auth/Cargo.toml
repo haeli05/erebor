@@ -5,6 +5,8 @@ edition.workspace = true
 
 [dependencies]
 erebor-common = { path = "../erebor-common" }
+async-trait = "0.1"
+tower = { workspace = true }
 tokio = { workspace = true }
 axum = { workspace = true }
 serde = { workspace = true }
@@ -22,3 +24,4 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
+async-trait = "0.1"
