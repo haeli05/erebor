@@ -1,135 +1,149 @@
 # Security Model
 
-Erebor handles private key material. This document describes the threat model, security architecture, and cryptographic choices.
+Security is non-negotiable in wallet infrastructure. This document describes Erebor's threat model, cryptographic choices, and security invariants.
 
 ## Threat Model
 
 | Threat | Impact | Mitigation |
 |--------|--------|-----------|
-| **Server DB breach** | Encrypted key shares exposed | Envelope encryption — shares encrypted with per-user DEK, DEK derived from master key via HKDF |
-| **Server compromise (root)** | Active signing capability | Shamir: server share alone can't sign (need 2-of-3). Rate limiting + anomaly detection flags unusual activity. |
-| **Device theft** | One key share exposed | Share alone is useless (below threshold). Biometric lock on device share. Remote share invalidation via rotation. |
-| **Master key compromise** | Can decrypt all server-side shares | Each share alone is useless. Use KMS (AWS/GCP) to protect master key in production. |
-| **Insider attack** | Full system access | Audit log is append-only. Share threshold means no single operator can sign. TEE option removes even operator access. |
-| **Social engineering** | Account takeover | Multi-factor required for recovery. Time-lock on recovery. Cannot unlink last auth method. |
-| **Replay attack** | Duplicate transactions | Nonces on all OTPs, SIWE messages, and on-chain operations. Single-use refresh tokens. |
-| **Token theft** | Session hijack | Refresh token rotation — using a revoked token triggers revocation of ALL sessions for that user. |
+| **Server DB breach** | Encrypted shares exposed | Envelope encryption — shares encrypted with per-user DEK, DEK derived via HKDF from master key |
+| **Server compromise (root)** | Active signing abuse | Server alone holds 1 of 3 shares — cannot reconstruct. Rate limiting + anomaly detection. |
+| **Device theft** | One key share exposed | Share alone is useless without server share. Biometric lock on device share. |
+| **Insider attack** | Full system access | Operator holds infra, not keys. Audit log is immutable. MPC-TSS mode: operator holds 1 of N shares. |
+| **Social engineering** | Account takeover | Multi-factor auth for recovery. Time-lock delays. Guardian-based recovery requires M-of-N. |
+| **Supply chain attack** | Malicious dependency | Minimal dependencies. `cargo audit`. Reproducible builds. |
+| **Replay attack** | Duplicate transactions | Nonces on all operations. Session-scoped tokens. |
+| **Token theft** | Session hijack | Refresh token rotation. Revoked token triggers all-session revocation. |
 
-## Cryptographic Primitives
+## Cryptographic Choices
 
 | Purpose | Algorithm | Standard |
 |---------|-----------|----------|
-| Share encryption at rest | **AES-256-GCM** | NIST SP 800-38D |
-| Per-user key derivation | **HKDF-SHA256** | RFC 5869 |
-| Secret sharing | **Shamir SSS over GF(2^8)** | Shamir 1979 |
-| HD wallet derivation | **BIP-32/BIP-44** | Bitcoin standards |
-| Ethereum signatures | **ECDSA secp256k1** | SEC 2 |
-| Solana signatures | **EdDSA Ed25519** | RFC 8032 |
-| JWT signing | **HMAC-SHA256** | RFC 7519 |
-| User ID derivation | **SHA-256** | FIPS 180-4 |
-| Password hashing | **Argon2id** | RFC 9106 (planned) |
+| Signing (EVM) | ECDSA on secp256k1 | SEC 2 |
+| Signing (Solana) | EdDSA on Ed25519 | RFC 8032 |
+| Share encryption | AES-256-GCM | NIST SP 800-38D |
+| Key derivation | HKDF-SHA256 | RFC 5869 |
+| HD wallets | BIP-32 / BIP-44 | Bitcoin standards |
+| Secret sharing | Shamir SSS over GF(2⁸) | Shamir 1979 |
+| Hashing | SHA-256, Keccak-256 | FIPS 180-4 / Ethereum |
+| JWT signing | HMAC-SHA256 | RFC 7519 |
 
-## Key Security Architecture
-
-### Envelope Encryption
+## Key Material Lifecycle
 
 ```
-Environment/KMS
-      │
-      │  Master Key (32 bytes)
-      │
-      ▼
-   ┌──────┐  HKDF(master_key, user_id)
-   │ HKDF │──────────────────────────────► Per-User DEK
-   └──────┘
-                                                │
-                                                ▼
-                                          ┌───────────┐
-                                          │ AES-256-  │
-                                          │ GCM       │
-                                          │ encrypt   │
-                                          └─────┬─────┘
-                                                │
-                                    ┌───────────┴───────────┐
-                                    │ ciphertext + nonce    │
-                                    │ (stored in database)  │
-                                    └───────────────────────┘
+  Generate          Split            Encrypt           Store
+ ┌────────┐     ┌──────────┐     ┌───────────┐     ┌────────┐
+ │ Random │────►│  Shamir  │────►│ AES-256   │────►│ DB     │
+ │ Seed   │     │  2-of-3  │     │ GCM       │     │(encr.) │
+ └────────┘     └──────────┘     └───────────┘     └────────┘
+     │                                                  │
+     ▼ (zeroize)                                        │
+                                                        │
+  Sign              Reconstruct       Decrypt           │
+ ┌────────┐     ┌──────────┐     ┌───────────┐     ┌───┘
+ │ ECDSA  │◄────│  Lagrange│◄────│ AES-256   │◄────┤
+ │ sign   │     │  interp. │     │ GCM       │     │
+ └────────┘     └──────────┘     └───────────┘     │
+     │                │                             │
+     ▼ (zeroize)      ▼ (zeroize)                   │
 ```
 
-An attacker needs **both** the master key **and** database access to decrypt shares. And even then, each individual share is useless without meeting the Shamir threshold.
-
-### Memory Safety
-
-All secret types use the `zeroize` crate:
+At every stage, secret material is zeroed after use via the `zeroize` crate:
 
 ```rust
-#[derive(Clone, Zeroize)]
+#[derive(Zeroize)]
 #[zeroize(drop)]
 pub struct SecretBytes(pub Vec<u8>);
 
-impl std::fmt::Debug for SecretBytes {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SecretBytes([REDACTED; {} bytes])", self.0.len())
-    }
-}
+// When SecretBytes is dropped, memory is overwritten with zeros
+// Debug output: "SecretBytes([REDACTED; 32 bytes])"
 ```
 
-- **Drop semantics:** Memory is zeroed when `SecretBytes` goes out of scope
-- **Debug redaction:** Printing a `SecretBytes` never reveals the contents
-- **Rust's ownership model:** Prevents use-after-free and double-free on secret data
+## Defence in Depth
 
-### Rate Limiting
+### Layer 1: Authentication
+- JWT with short-lived access tokens (15 min)
+- Refresh token rotation (detect theft)
+- Rate limiting per IP (token bucket)
+- OTP: 6 digits, 3 max attempts, 10-min expiry
+- SIWE: domain validation, nonce management, expiration
 
-Token bucket rate limiter on all endpoints:
+### Layer 2: Key Splitting
+- Shamir 2-of-3 — no single party holds the full key
+- Server holds 1 share (encrypted), device holds 1, recovery backup holds 1
+- Share rotation without changing the underlying key
 
-- Per-IP tracking (supports `X-Forwarded-For` behind proxies)
-- Configurable max tokens and refill rate
-- Auth-specific limits: 3 OTP attempts, 5 sends per email per hour
-- SIWE nonces are single-use with TTL
+### Layer 3: Encryption at Rest
+- Envelope encryption with HKDF-derived per-user keys
+- AES-256-GCM (authenticated encryption — detects tampering)
+- Random nonce per encryption operation
 
-### Session Security
+### Layer 4: Memory Safety
+- Rust — no buffer overflows, use-after-free, or data races
+- `zeroize` on all secret types — memory scrubbed on drop
+- `SecretBytes` redacts debug output
 
-1. **Short-lived access tokens** (15 min) — Limits window of exploitation
-2. **Refresh token rotation** — Each refresh invalidates the previous token
-3. **Theft detection** — Using a revoked refresh token revokes ALL sessions for that user
-4. **Session expiry cleanup** — Expired sessions are periodically purged
+### Layer 5: Audit Trail
+- Every key operation logged with timestamp, user ID, operation type
+- Append-only log — entries are never modified or deleted
+- Operations: CreateWallet, SignTransaction, RotateShares, ExportRecoveryShare
 
-## GF(2^8) Implementation
+## Recovery Flows
 
-The Shamir implementation uses Galois Field arithmetic with the AES irreducible polynomial (x^8 + x^4 + x^3 + x + 1):
+### Lost Device
 
-```rust
-fn gf256_mul(mut a: u8, mut b: u8) -> u8 {
-    let mut result: u8 = 0;
-    for _ in 0..8 {
-        if b & 1 != 0 { result ^= a; }
-        let hi = a & 0x80;
-        a <<= 1;
-        if hi != 0 { a ^= 0x1b; } // AES polynomial
-        b >>= 1;
-    }
-    result
-}
+```
+1. User authenticates via remaining method (email, Google)
+2. Server releases server share (1 of 3)
+3. Recovery share retrieved (backup password)
+4. Seed reconstructed → new device share generated
+5. Old device share invalidated via rotation
 ```
 
-Field inversion uses Fermat's little theorem: a^(254) = a^(-1) in GF(256).
+### Lost Server (Self-Hosted Server Destroyed)
 
-The implementation is tested with:
-- Identity and zero properties
-- Inverse verification for all 255 non-zero elements
-- BIP-32 test vectors from the specification
-- Round-trip split/reconstruct with different share combinations
-- Cross-pair consistency (all valid share pairs produce the same secret)
+```
+1. Device share + recovery share = 2 of 3 → reconstruct seed
+2. Export raw private key or re-derive addresses
+3. Re-deploy server, re-split key with new shares
+```
 
-## Production Hardening Checklist
+### Planned: Social Recovery
 
-- [ ] Store `VAULT_MASTER_KEY` in a KMS (AWS KMS, GCP KMS, HashiCorp Vault)
-- [ ] Enable TLS termination at the reverse proxy
-- [ ] Set `RUST_LOG=warn` in production (avoid verbose logging)
-- [ ] Run behind a WAF with DDoS protection
-- [ ] Enable PostgreSQL SSL mode
-- [ ] Restrict database user permissions (no DROP, no schema changes)
-- [ ] Enable Redis AUTH and TLS
-- [ ] Set up monitoring for anomalous signing patterns
-- [ ] Regular key rotation schedule
-- [ ] Automated backup of encrypted share storage
+```
+1. User designates 5 guardians
+2. 3-of-5 guardians must approve recovery
+3. 48-hour time lock after approval (anti-social-engineering)
+4. Guardian approval via signed message or email confirmation
+```
+
+## Future: Key Management Strategies
+
+Erebor is designed to support three strategies (operator chooses):
+
+| Strategy | Key Exists in Full? | Signing Latency | Complexity |
+|----------|-------------------|-----------------|------------|
+| **Shamir SSS** (current) | Briefly, in memory | Low | Low |
+| **MPC-TSS** (planned) | Never | Higher (network rounds) | High |
+| **TEE** (planned) | Inside enclave only | Lowest | Medium |
+
+### MPC-TSS (CGGMP21)
+
+The key **never exists in full anywhere**. Each party holds a share and participates in a distributed signing protocol:
+
+```
+Device ◄────► Server ◄────► Recovery
+   │              │
+   └──── MPC ─────┘
+        Protocol
+           │
+      Signature
+   (key never assembled)
+```
+
+### TEE (Trusted Execution Environment)
+
+Key operations run inside a hardware enclave (AWS Nitro, Intel SGX):
+- Key generated and stored inside TEE
+- Even the server operator with root access cannot extract keys
+- TEE attestation proves code integrity

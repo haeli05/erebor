@@ -81,7 +81,7 @@ mod tests {
         let mgr = JwtManager {
             encoding_key: EncodingKey::from_secret(b"test-secret"),
             decoding_key: DecodingKey::from_secret(b"test-secret"),
-            access_ttl: Duration::seconds(-1), // already expired
+            access_ttl: Duration::seconds(-120), // already expired (past leeway)
             refresh_ttl: Duration::days(30),
         };
         let user_id = UserId::new();
