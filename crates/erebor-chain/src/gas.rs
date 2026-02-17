@@ -288,12 +288,11 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
-    async fn mock_server(port: u16, responses: Vec<&'static str>) -> tokio::task::JoinHandle<()> {
-        let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
-            .await
-            .unwrap();
+    async fn mock_server(responses: Vec<&'static str>) -> (u16, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             for resp_body in responses {
                 if let Ok((mut stream, _)) = listener.accept().await {
                     let mut buf = vec![0u8; 4096];
@@ -306,7 +305,8 @@ mod tests {
                     let _ = stream.write_all(http.as_bytes()).await;
                 }
             }
-        })
+        });
+        (port, handle)
     }
 
     #[test]
@@ -358,10 +358,9 @@ mod tests {
     #[tokio::test]
     async fn test_legacy_gas_oracle() {
         let resp = r#"{"jsonrpc":"2.0","result":"0x3b9aca00","id":1}"#;
-        let _server = mock_server(18560, vec![resp]).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (port, _server) = mock_server(vec![resp]).await;
 
-        let pool = RpcPool::new(1, vec!["http://127.0.0.1:18560".into()]);
+        let pool = RpcPool::new(1, vec![format!("http://127.0.0.1:{port}")]);
         let oracle = LegacyGasOracle;
         let (gas_price, priority) = oracle.estimate_gas_price(&pool).await.unwrap();
         assert_eq!(gas_price, 1_000_000_000); // 1 gwei
@@ -371,16 +370,13 @@ mod tests {
     #[tokio::test]
     async fn test_eip1559_gas_oracle() {
         let resp = r#"{"jsonrpc":"2.0","result":{"baseFeePerGas":["0x3b9aca00","0x3b9aca00","0x3b9aca00","0x3b9aca00","0x3b9aca00","0x3b9aca00"],"reward":[["0x59682f00"],["0x59682f00"],["0x59682f00"],["0x59682f00"],["0x59682f00"]]},"id":1}"#;
-        let _server = mock_server(18561, vec![resp]).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (port, _server) = mock_server(vec![resp]).await;
 
-        let pool = RpcPool::new(1, vec!["http://127.0.0.1:18561".into()]);
+        let pool = RpcPool::new(1, vec![format!("http://127.0.0.1:{port}")]);
         let oracle = Eip1559GasOracle::new();
         let (max_fee, priority) = oracle.estimate_gas_price(&pool).await.unwrap();
 
-        // base_fee = 1 gwei, priority = 1.5 gwei (0x59682f00)
-        // max_fee = 2 * 1gwei + 1.5gwei = 3.5 gwei
-        let expected_priority: u128 = 0x59682f00; // 1_500_000_000
+        let expected_priority: u128 = 0x59682f00;
         let expected_max = 1_000_000_000u128 * 2 + expected_priority;
         assert_eq!(max_fee, expected_max);
         assert_eq!(priority, Some(expected_priority));
@@ -388,12 +384,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_gas_estimator_full_flow() {
-        // Legacy oracle response
         let resp = r#"{"jsonrpc":"2.0","result":"0x3b9aca00","id":1}"#;
-        let _server = mock_server(18562, vec![resp]).await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let (port, _server) = mock_server(vec![resp]).await;
 
-        let pool = RpcPool::new(1, vec!["http://127.0.0.1:18562".into()]);
+        let pool = RpcPool::new(1, vec![format!("http://127.0.0.1:{port}")]);
         let estimator = GasEstimator::new(1.2);
         let oracle = LegacyGasOracle;
 

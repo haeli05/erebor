@@ -420,20 +420,17 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    // Mock HTTP server for testing
+    // Mock HTTP server for testing — binds to port 0 for a random available port.
     async fn mock_rpc_server(
-        port: u16,
         response_body: &'static str,
-    ) -> tokio::task::JoinHandle<()> {
+    ) -> (u16, tokio::task::JoinHandle<()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::TcpListener;
 
-        let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
-            .await
-            .unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
 
-        tokio::spawn(async move {
-            // Handle a few connections then exit
+        let handle = tokio::spawn(async move {
             for _ in 0..10 {
                 if let Ok((mut stream, _)) = listener.accept().await {
                     let mut buf = vec![0u8; 4096];
@@ -446,7 +443,8 @@ mod tests {
                     let _ = stream.write_all(http_resp.as_bytes()).await;
                 }
             }
-        })
+        });
+        (port, handle)
     }
 
     #[test]
@@ -491,10 +489,9 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_pool_successful_request() {
         let resp = r#"{"jsonrpc":"2.0","result":"0x10","id":1}"#;
-        let _server = mock_rpc_server(18545, resp).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (port, _server) = mock_rpc_server(resp).await;
 
-        let pool = RpcPool::new(1, vec!["http://127.0.0.1:18545".into()]);
+        let pool = RpcPool::new(1, vec![format!("http://127.0.0.1:{port}")]);
         let result = pool
             .request("eth_blockNumber", serde_json::json!([]))
             .await
@@ -504,16 +501,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_rpc_pool_failover() {
-        // First endpoint is unreachable, second works
         let resp = r#"{"jsonrpc":"2.0","result":"0xabc","id":1}"#;
-        let _server = mock_rpc_server(18546, resp).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (port, _server) = mock_rpc_server(resp).await;
 
         let pool = RpcPool::new(
             1,
             vec![
                 "http://127.0.0.1:19999".into(), // dead
-                "http://127.0.0.1:18546".into(), // alive
+                format!("http://127.0.0.1:{port}"), // alive
             ],
         );
         let result = pool
@@ -522,7 +517,6 @@ mod tests {
             .unwrap();
         assert_eq!(result, serde_json::json!("0xabc"));
 
-        // First endpoint should have a failure recorded
         let eps = pool.endpoints.read().unwrap();
         assert!(eps[0].failures > 0);
         assert_eq!(eps[1].failures, 0);
@@ -531,10 +525,9 @@ mod tests {
     #[tokio::test]
     async fn test_rpc_json_rpc_error() {
         let resp = r#"{"jsonrpc":"2.0","error":{"code":-32600,"message":"Invalid Request"},"id":1}"#;
-        let _server = mock_rpc_server(18547, resp).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (port, _server) = mock_rpc_server(resp).await;
 
-        let pool = RpcPool::new(1, vec!["http://127.0.0.1:18547".into()]);
+        let pool = RpcPool::new(1, vec![format!("http://127.0.0.1:{port}")]);
         let result = pool.request("eth_bad", serde_json::json!([])).await;
         match result {
             Err(RpcError::JsonRpc { code, .. }) => assert_eq!(code, -32600),
@@ -545,10 +538,9 @@ mod tests {
     #[tokio::test]
     async fn test_evm_client_get_nonce() {
         let resp = r#"{"jsonrpc":"2.0","result":"0x2a","id":1}"#;
-        let _server = mock_rpc_server(18548, resp).await;
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        let (port, _server) = mock_rpc_server(resp).await;
 
-        let pool = Arc::new(RpcPool::new(1, vec!["http://127.0.0.1:18548".into()]));
+        let pool = Arc::new(RpcPool::new(1, vec![format!("http://127.0.0.1:{port}")]));
         let client = EvmRpcClient::new(pool);
         let nonce = client.get_nonce("0xabc").await.unwrap();
         assert_eq!(nonce, 42);
