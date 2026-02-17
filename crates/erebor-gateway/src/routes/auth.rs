@@ -361,7 +361,7 @@ pub async fn unlink_provider(
         .linking
         .unlink_identity(&user_id, &provider)
         .await
-        .map_err(ApiError::from)?;
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
 
     Ok(Json(MessageResponse {
         message: "Identity unlinked".into(),
