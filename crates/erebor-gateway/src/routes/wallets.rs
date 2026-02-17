@@ -275,6 +275,8 @@ mod tests {
     };
     use tower::util::ServiceExt;
     use crate::state::AppState;
+    use erebor_common::UserId;
+    use erebor_vault::WalletInfo;
 
     fn test_state() -> AppState {
         AppState::new().expect("Failed to create test state")

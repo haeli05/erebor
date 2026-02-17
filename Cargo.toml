@@ -22,7 +22,7 @@ repository = "https://github.com/haeli05/erebor"
 tokio = { version = "1", features = ["full"] }
 # Web framework
 axum = { version = "0.7", features = ["macros"] }
-tower = "0.4"
+tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.5", features = ["cors", "trace", "compression-gzip"] }
 # Serialization
 serde = { version = "1", features = ["derive"] }
