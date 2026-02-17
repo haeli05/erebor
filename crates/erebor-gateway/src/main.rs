@@ -1,6 +1,15 @@
-use axum::{routing::get, Json, Router};
+mod state;
+mod error;
+mod routes;
+mod auth;
+
+use axum::{routing::get, Json, Router, middleware};
+use erebor_auth::middleware::{auth_middleware, rate_limit_middleware, RateLimiter};
 use serde_json::json;
+use std::sync::Arc;
+use tower_http::cors::CorsLayer;
 use tracing_subscriber::EnvFilter;
+use state::AppState;
 
 #[tokio::main]
 async fn main() {
@@ -9,9 +18,27 @@ async fn main() {
         .with_env_filter(EnvFilter::from_default_env())
         .init();
 
+    // Initialize application state
+    let state = AppState::new().expect("Failed to initialize app state");
+
+    // Create rate limiter (100 requests per minute)
+    let rate_limiter = Arc::new(RateLimiter::new(100.0, 1.67)); // 100/60 tokens per second
+
+    // Build the application router
     let app = Router::new()
+        // Health and info endpoints
         .route("/health", get(health))
-        .route("/", get(root));
+        .route("/", get(root))
+        // API routes
+        .merge(routes::api_router())
+        // Add middleware layers
+        .layer(middleware::from_fn(auth_middleware))
+        .layer(middleware::from_fn(rate_limit_middleware))
+        .layer(CorsLayer::permissive())
+        // Add shared state
+        .layer(axum::Extension(state.jwt.clone()))
+        .layer(axum::Extension(rate_limiter))
+        .with_state(state);
 
     let addr = "0.0.0.0:8080";
     tracing::info!("Erebor gateway listening on {addr}");
