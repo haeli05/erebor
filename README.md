@@ -28,7 +28,7 @@ Privy bundles three commodity pieces (OAuth, key splitting, smart contract walle
 | **Key custody** | ✅ Non-custodial (Shamir 2-of-3) | ⚠️ MPC (Privy holds shares) | ⚠️ MPC (nodes distributed) | ❌ Delegated |
 | **Pricing** | ✅ Free | 💰 Per MAU | 💰 Per MAU | 💰 Per MAU |
 | **Audit** | ✅ Full source | ❌ Trust us | ⚠️ Partial | ❌ Trust us |
-| **Auth methods** | OAuth, Email OTP, SIWE, Passkeys | OAuth, Email, Phone, SIWE | OAuth, Email, Phone | Email, Phone, OAuth |
+| **Auth methods** | OAuth (Google, Apple, Twitter, Discord, GitHub), Email, Phone, SIWE, Farcaster, Telegram | OAuth, Email, Phone, SIWE | OAuth, Email, Phone | Email, Phone, OAuth |
 | **Account abstraction** | ✅ ERC-4337 | ✅ ERC-4337 | ⚠️ Limited | ❌ No |
 | **Multi-chain** | EVM + Solana | EVM + Solana | EVM + Solana | EVM |
 | **Language** | Rust | Node.js | Node.js | Node.js |
@@ -70,11 +70,13 @@ Privy bundles three commodity pieces (OAuth, key splitting, smart contract walle
 | Crate | Status | Description |
 |-------|--------|-------------|
 | `erebor-common` | ✅ Implemented | Shared types, errors, `SecretBytes` with zeroize |
-| `erebor-auth` | ✅ Implemented | OAuth (Google), Email OTP, SIWE, Passkey stub. JWT sessions, identity linking, rate limiting, auth middleware |
+| `erebor-auth` | ✅ Implemented | OAuth (Google, Apple, Twitter, Discord, GitHub), Email OTP, Phone OTP, SIWE, Farcaster SIWF, Telegram, Passkey stub. JWT sessions, identity linking, rate limiting, auth middleware |
 | `erebor-vault` | ✅ Implemented | Shamir 2-of-3 over GF(2^8), AES-256-GCM envelope encryption, BIP-32/44 HD derivation (ETH + Solana), secp256k1/Ed25519 signing, share rotation, recovery export, audit trail |
-| `erebor-gateway` | ✅ Implemented | axum API gateway with health check |
+| `erebor-gateway` | ✅ Implemented | axum API gateway with 18+ REST endpoints, auth middleware, CORS, rate limiting |
 | `erebor-aa` | ✅ Implemented | ERC-4337 bundler, paymaster (verifying, sponsored, ERC-20), smart contract wallets, session keys with spending limits |
-| `erebor-chain` | ✅ Implemented | Multi-chain RPC pooling with failover, EIP-1559 + legacy gas estimation, chain registry (ETH, Base, Polygon, Arbitrum, Optimism, Solana) |
+| `erebor-chain` | ✅ Implemented | Multi-chain RPC pooling with failover, EIP-1559 + legacy gas estimation, tx signing + broadcast pipeline, nonce management, chain registry (ETH, Base, Polygon, Arbitrum, Optimism, Solana) |
+| `erebor-policy` | ✅ Implemented | Policy engine with 11 rule types, condition sets (AND/OR), aggregation tracking, multi-party key quorums, approval workflows |
+| `@erebor/react` | ✅ Implemented | React SDK — `useErebor()`, `useWallets()`, `useSendTransaction()`, LoginModal, WalletButton, iframe bridge, `usePrivy()` compatibility shim |
 
 ## Feature Parity with Privy
 
@@ -86,40 +88,48 @@ Honest accounting of where Erebor stands today versus Privy's production offerin
 |---------|--------|-------|-------|
 | Email OTP auth | ✅ | ✅ | Rate-limited, 6-digit, 10min TTL |
 | Google OAuth | ✅ | ✅ | Code → token → userinfo flow |
+| Apple OAuth | ✅ | ✅ | ES256 JWT client secret, ID token validation |
+| Twitter OAuth | ✅ | ✅ | OAuth 2.0 with PKCE |
+| Discord OAuth | ✅ | ✅ | Standard OAuth 2.0 |
+| GitHub OAuth | ✅ | ✅ | OAuth 2.0 with email scope |
+| Farcaster (SIWF) | ✅ | ✅ | Sign In With Farcaster, custody address verification |
+| Telegram auth | ✅ | ✅ | Login Widget HMAC-SHA256 verification |
+| Phone / SMS OTP | ✅ | ✅ | E.164 validation, rate limiting, Twilio-ready |
 | SIWE (wallet login) | ✅ | ✅ | EIP-4361 with nonce/domain/expiry validation |
 | JWT sessions | ✅ | ✅ | Refresh token rotation with theft detection |
 | Identity linking | ✅ | ✅ | Multi-provider per user, last-identity guard |
 | Key splitting | ✅ Shamir 2-of-3 | MPC | Different approach — Shamir is simpler, auditable |
 | HD key derivation | ✅ BIP-32/44 | ✅ | ETH (`m/44'/60'/0'/0/n`) + Solana (`m/44'/501'/0'/0'`) |
 | Envelope encryption | ✅ AES-256-GCM | Proprietary | Per-user HKDF-derived keys, zeroize on drop |
-| ERC-4337 structures | ✅ | ✅ | UserOperation, bundler, paymaster, session keys |
+| ERC-4337 bundler | ✅ | ✅ | UserOperation, mempool, bundle submission |
+| Paymaster | ✅ | ✅ | Verifying, sponsored, and ERC-20 paymasters |
+| Session keys | ✅ | ✅ | Spending limits, time bounds, permissions |
 | Multi-chain config | ✅ | ✅ | EVM (ETH, Base, Polygon, Arbitrum, Optimism) + Solana |
 | Gas estimation | ✅ | ✅ | EIP-1559 + legacy oracles with safety margins |
 | RPC pool + failover | ✅ | ✅ | Health tracking, caching, automatic failover |
-| Self-hosted | ✅ | ❌ | Erebor's entire value proposition |
-| Full source audit | ✅ | ❌ | MIT licensed, every line readable |
+| Tx signing + broadcast | ✅ | ✅ | RLP encoding, EIP-155, nonce management, receipt polling |
+| React SDK | ✅ | ✅ | `useErebor()`, `useWallets()`, LoginModal, `usePrivy()` compat shim |
+| Embedded wallet iframe | ✅ | ✅ | Cross-origin iframe bridge with postMessage protocol |
+| Policy engine | ✅ | ✅ | 11 rule types, condition sets, aggregations, key quorums |
 | Rate limiting | ✅ | ✅ | Token bucket per key |
 | Audit trail | ✅ | Partial | Immutable log of every key operation |
+| Self-hosted | ✅ | ❌ | Erebor's entire value proposition |
+| Full source audit | ✅ | ❌ | MIT licensed, every line readable |
+| No per-MAU pricing | ✅ | ❌ | Free forever |
 
-### ❌ Not Yet at Parity
+### 🔜 Planned (Beyond Privy Parity)
 
-| Feature | Priority | Privy Has | Erebor Status | Gap Size |
-|---------|----------|-----------|---------------|----------|
-| **React SDK (`useErebor()`)** | 🔴 Critical | `@privy-io/react-auth` — hooks, login modals, wallet UI | Doc stubs only | Huge — this IS the product |
-| **Embedded wallet iframe** | 🔴 Critical | Cross-origin iframe isolates key ops from app | Server-side vault only | Huge — security model difference |
-| **Transaction signing + broadcast** | 🔴 Critical | `eth_sendTransaction`, `signMessage`, `signTypedData`, nonce mgmt | RPC pool exists, no tx pipeline | Large |
-| **Smart wallet deployment** | 🟡 High | Deploys real ERC-4337 accounts on-chain | In-memory structs, no on-chain calls | Large |
-| **More OAuth providers** | 🟡 High | Apple, Twitter, Discord, GitHub, Farcaster, Telegram, Instagram, Twitch, Spotify, LinkedIn | Google only | Medium |
-| **Phone / SMS auth** | 🟡 High | Twilio-backed phone OTP | Not implemented | Medium |
-| **Policy engine** | 🟡 High | Rules, condition sets, aggregations, key quorums, spending velocity | Basic session key limits | Medium |
-| **Webhook events** | 🟢 Medium | User created, wallet created, tx complete callbacks | Audit log only (no outbound) | Small |
-| **Fiat on/off ramp** | 🟢 Medium | KYC, bank accounts, onramp/offramp APIs | Not planned | Medium — niche |
-| **React Native SDK** | 🟢 Medium | Full Expo SDK | Not started | Medium |
-| **Swift / Kotlin SDKs** | 🟢 Medium | Native iOS + Android | Not started | Medium |
-| **Admin dashboard** | 🟢 Medium | Web UI for users, apps, policies | CLI/API only | Small |
-| **Passkey auth** | 🟢 Medium | WebAuthn / FIDO2 | Stub only | Small |
-| **Pre-generated wallets** | 🟢 Medium | Create wallets before user signs in | Not implemented | Small |
-| **Custom auth (OIDC)** | 🟢 Medium | Bring-your-own identity provider | Not implemented | Small |
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Webhook events | 🟢 Planned | User/wallet/tx lifecycle callbacks |
+| React Native SDK | 🟢 Planned | Expo-based mobile SDK |
+| Swift / Kotlin SDKs | 🟢 Planned | Native iOS + Android |
+| Admin dashboard | 🟢 Planned | Web UI for managing users, policies, apps |
+| Fiat on/off ramp | 🟢 Planned | KYC + bank account integration |
+| MPC-TSS (CGGMP21) | 🟢 Planned | Threshold signing without key reconstruction |
+| TEE / HSM support | 🟢 Planned | Intel SGX, AWS Nitro enclaves |
+| Passkey (WebAuthn) | 🟢 Planned | FIDO2 full implementation (stub exists) |
+| Custom OIDC auth | 🟢 Planned | Bring-your-own identity provider |
 
 ## Quick Start
 
@@ -354,12 +364,12 @@ cd docs && mdbook serve
 - [x] **Phase 1:** Auth service (OAuth, Email OTP, SIWE) + Shamir vault + gateway
 - [x] **Phase 2:** ERC-4337 bundler + paymaster + smart accounts + session keys
 - [x] **Phase 3:** Multi-chain RPC pooling + gas estimation + chain registry
-- [ ] **Phase 4:** Gateway API routes — full REST API for auth, wallets, signing, transactions
-- [ ] **Phase 5:** Transaction signing + broadcast pipeline (nonce mgmt, gas bumping, retry)
-- [ ] **Phase 6:** React SDK (`@erebor/react`) — `useErebor()`, login modal, wallet hooks
-- [ ] **Phase 7:** Embedded wallet iframe — cross-origin key isolation
-- [ ] **Phase 8:** More OAuth providers (Apple, Twitter, Discord, GitHub, Farcaster)
-- [ ] **Phase 9:** Policy engine — rules, condition sets, spending velocity, key quorums
+- [x] **Phase 4:** Gateway API routes — 18+ REST endpoints for auth, wallets, signing, transactions
+- [x] **Phase 5:** Transaction signing + broadcast pipeline (RLP, EIP-155, nonce mgmt, receipt polling)
+- [x] **Phase 6:** React SDK (`@erebor/react`) — `useErebor()`, login modal, wallet hooks, `usePrivy()` compat
+- [x] **Phase 7:** Embedded wallet iframe — cross-origin key isolation via postMessage bridge
+- [x] **Phase 8:** OAuth providers (Apple, Twitter, Discord, GitHub, Farcaster, Telegram, Phone OTP)
+- [x] **Phase 9:** Policy engine — 11 rule types, condition sets, aggregations, key quorums
 - [ ] **Phase 10:** React Native + Swift + Kotlin SDKs
 - [ ] **Phase 11:** MPC-TSS (CGGMP21) + social recovery + anomaly detection
 - [ ] **Phase 12:** TEE support + HSM + Kubernetes Helm charts
