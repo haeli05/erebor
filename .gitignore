@@ -1,4 +1,46 @@
+# Rust
 /target
+Cargo.lock
+
+# Environment files
 .env
+.env.local
+.env.production
+
+# Editor files
 *.swp
 *.swo
+*~
+.vscode/
+.idea/
+
+# Node.js (React/React Native SDKs)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.yarn-integrity
+dist/
+build/
+
+# Mobile SDKs
+## iOS
+*.xcuserstate
+*.xcscheme
+*.xcworkspace/xcuserdata/
+.DS_Store
+
+## Android
+*.keystore
+local.properties
+.gradle/
+
+# Swift
+.build/
+*.xcodeproj/
+Package.resolved
+
+# Kotlin
+*.iml
+.gradle/

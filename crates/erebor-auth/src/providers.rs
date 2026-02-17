@@ -10,7 +10,6 @@ use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use hmac::{Hmac, Mac};
-use url::Url;
 use regex::Regex;
 
 /// User info returned from a provider after authentication
