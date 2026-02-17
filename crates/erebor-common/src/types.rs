@@ -33,6 +33,7 @@ pub enum AuthProvider {
     Siwe,
     Passkey,
     Farcaster,
+    Telegram,
     Custom(String),
 }
 

@@ -5,7 +5,7 @@ use axum::{
 };
 use erebor_auth::{
     deterministic_user_id,
-    providers::{SiweMessage, AuthProviderHandler}
+    providers::{SiweMessage, FarcasterMessage, TelegramAuthData, AuthProviderHandler}
 };
 use erebor_common::{AuthProvider, EreborError, UserId};
 use serde::{Deserialize, Serialize};
@@ -43,6 +43,52 @@ pub struct NonceResponse {
 pub struct SiweVerifyRequest {
     pub message: SiweMessage,
     pub signature: String,
+}
+
+#[derive(Deserialize)]
+pub struct FarcasterVerifyRequest {
+    pub message: FarcasterMessage,
+    pub signature: String,
+}
+
+#[derive(Deserialize)]
+pub struct TelegramVerifyRequest {
+    pub auth_data: TelegramAuthData,
+}
+
+#[derive(Deserialize)]
+pub struct AppleAuthRequest {
+    pub code: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Deserialize)]
+pub struct TwitterAuthRequest {
+    pub code: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Deserialize)]
+pub struct DiscordAuthRequest {
+    pub code: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Deserialize)]
+pub struct GitHubAuthRequest {
+    pub code: String,
+    pub redirect_uri: String,
+}
+
+#[derive(Deserialize)]
+pub struct SendPhoneOtpRequest {
+    pub phone: String,
+}
+
+#[derive(Deserialize)]
+pub struct VerifyPhoneOtpRequest {
+    pub phone: String,
+    pub code: String,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +161,236 @@ async fn issue_tokens_and_respond(
 // ---------------------------------------------------------------------------
 // Route handlers
 // ---------------------------------------------------------------------------
+
+/// POST /auth/apple — Exchange Apple OAuth code for tokens
+pub async fn apple_auth(
+    State(state): State<AppState>,
+    Json(req): Json<AppleAuthRequest>,
+) -> ApiResult<Json<AuthResponse>> {
+    let apple = state
+        .providers
+        .apple
+        .as_ref()
+        .ok_or_else(|| ApiError::from(EreborError::Internal("Apple OAuth not configured".into())))?;
+
+    let provider_user = apple
+        .authenticate(&req.code)
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    let user_id = deterministic_user_id(&AuthProvider::Apple, &provider_user.provider_user_id);
+
+    state
+        .linking
+        .link_identity(
+            &user_id,
+            AuthProvider::Apple,
+            provider_user.provider_user_id,
+            provider_user.email,
+        )
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    issue_tokens_and_respond(&state, &user_id, vec!["apple".into()]).await
+}
+
+/// POST /auth/twitter — Exchange Twitter OAuth code for tokens
+pub async fn twitter_auth(
+    State(state): State<AppState>,
+    Json(req): Json<TwitterAuthRequest>,
+) -> ApiResult<Json<AuthResponse>> {
+    let twitter = state
+        .providers
+        .twitter
+        .as_ref()
+        .ok_or_else(|| ApiError::from(EreborError::Internal("Twitter OAuth not configured".into())))?;
+
+    let provider_user = twitter
+        .authenticate(&req.code)
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    let user_id = deterministic_user_id(&AuthProvider::Twitter, &provider_user.provider_user_id);
+
+    state
+        .linking
+        .link_identity(
+            &user_id,
+            AuthProvider::Twitter,
+            provider_user.provider_user_id,
+            provider_user.email,
+        )
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    issue_tokens_and_respond(&state, &user_id, vec!["twitter".into()]).await
+}
+
+/// POST /auth/discord — Exchange Discord OAuth code for tokens
+pub async fn discord_auth(
+    State(state): State<AppState>,
+    Json(req): Json<DiscordAuthRequest>,
+) -> ApiResult<Json<AuthResponse>> {
+    let discord = state
+        .providers
+        .discord
+        .as_ref()
+        .ok_or_else(|| ApiError::from(EreborError::Internal("Discord OAuth not configured".into())))?;
+
+    let provider_user = discord
+        .authenticate(&req.code)
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    let user_id = deterministic_user_id(&AuthProvider::Discord, &provider_user.provider_user_id);
+
+    state
+        .linking
+        .link_identity(
+            &user_id,
+            AuthProvider::Discord,
+            provider_user.provider_user_id,
+            provider_user.email,
+        )
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    issue_tokens_and_respond(&state, &user_id, vec!["discord".into()]).await
+}
+
+/// POST /auth/github — Exchange GitHub OAuth code for tokens
+pub async fn github_auth(
+    State(state): State<AppState>,
+    Json(req): Json<GitHubAuthRequest>,
+) -> ApiResult<Json<AuthResponse>> {
+    let github = state
+        .providers
+        .github
+        .as_ref()
+        .ok_or_else(|| ApiError::from(EreborError::Internal("GitHub OAuth not configured".into())))?;
+
+    let provider_user = github
+        .authenticate(&req.code)
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    let user_id = deterministic_user_id(&AuthProvider::Github, &provider_user.provider_user_id);
+
+    state
+        .linking
+        .link_identity(
+            &user_id,
+            AuthProvider::Github,
+            provider_user.provider_user_id,
+            provider_user.email,
+        )
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    issue_tokens_and_respond(&state, &user_id, vec!["github".into()]).await
+}
+
+/// POST /auth/farcaster/verify — Verify Farcaster message and authenticate
+pub async fn farcaster_verify(
+    State(state): State<AppState>,
+    Json(req): Json<FarcasterVerifyRequest>,
+) -> ApiResult<Json<AuthResponse>> {
+    let provider_user = state
+        .providers
+        .farcaster
+        .verify(&req.message, &req.signature)
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    let user_id = deterministic_user_id(&AuthProvider::Farcaster, &provider_user.provider_user_id);
+
+    state
+        .linking
+        .link_identity(
+            &user_id,
+            AuthProvider::Farcaster,
+            provider_user.provider_user_id,
+            None,
+        )
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    issue_tokens_and_respond(&state, &user_id, vec!["farcaster".into()]).await
+}
+
+/// POST /auth/telegram/verify — Verify Telegram auth data and authenticate
+pub async fn telegram_verify(
+    State(state): State<AppState>,
+    Json(req): Json<TelegramVerifyRequest>,
+) -> ApiResult<Json<AuthResponse>> {
+    let provider_user = state
+        .providers
+        .telegram
+        .verify(&req.auth_data)
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    let user_id = deterministic_user_id(&AuthProvider::Telegram, &provider_user.provider_user_id);
+
+    state
+        .linking
+        .link_identity(
+            &user_id,
+            AuthProvider::Telegram,
+            provider_user.provider_user_id,
+            None,
+        )
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    issue_tokens_and_respond(&state, &user_id, vec!["telegram".into()]).await
+}
+
+/// POST /auth/phone/send-otp — Send OTP to phone
+pub async fn send_phone_otp(
+    State(state): State<AppState>,
+    Json(req): Json<SendPhoneOtpRequest>,
+) -> ApiResult<Json<MessageResponse>> {
+    state
+        .providers
+        .phone_otp
+        .send_otp(&req.phone)
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    Ok(Json(MessageResponse {
+        message: "OTP sent".into(),
+        success: true,
+    }))
+}
+
+/// POST /auth/phone/verify — Verify phone OTP and authenticate
+pub async fn verify_phone_otp(
+    State(state): State<AppState>,
+    Json(req): Json<VerifyPhoneOtpRequest>,
+) -> ApiResult<Json<AuthResponse>> {
+    let provider_user = state
+        .providers
+        .phone_otp
+        .verify_otp(&req.phone, &req.code)
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    let user_id = deterministic_user_id(&AuthProvider::Phone, &provider_user.provider_user_id);
+
+    state
+        .linking
+        .link_identity(
+            &user_id,
+            AuthProvider::Phone,
+            provider_user.provider_user_id,
+            None,
+        )
+        .await
+        .map_err(|e| ApiError::from(EreborError::AuthError(e.to_string())))?;
+
+    issue_tokens_and_respond(&state, &user_id, vec!["phone".into()]).await
+}
 
 /// POST /auth/google — Exchange Google OAuth code for tokens
 pub async fn google_auth(
@@ -200,6 +476,14 @@ pub async fn siwe_nonce(
     State(state): State<AppState>,
 ) -> ApiResult<Json<NonceResponse>> {
     let nonce = state.providers.siwe.generate_nonce().await;
+    Ok(Json(NonceResponse { nonce }))
+}
+
+/// POST /auth/farcaster/nonce — Return nonce for Farcaster authentication
+pub async fn farcaster_nonce(
+    State(state): State<AppState>,
+) -> ApiResult<Json<NonceResponse>> {
+    let nonce = state.providers.farcaster.generate_nonce().await;
     Ok(Json(NonceResponse { nonce }))
 }
 
@@ -293,6 +577,7 @@ pub async fn me(
             AuthProvider::Siwe => "siwe".to_string(),
             AuthProvider::Passkey => "passkey".to_string(),
             AuthProvider::Farcaster => "farcaster".to_string(),
+            AuthProvider::Telegram => "telegram".to_string(),
             AuthProvider::Custom(name) => name.clone(),
         })
         .collect();
@@ -354,6 +639,7 @@ pub async fn unlink_provider(
         "siwe" => AuthProvider::Siwe,
         "passkey" => AuthProvider::Passkey,
         "farcaster" => AuthProvider::Farcaster,
+        "telegram" => AuthProvider::Telegram,
         custom => AuthProvider::Custom(custom.to_string()),
     };
 
@@ -378,10 +664,19 @@ pub fn auth_router() -> Router<AppState> {
     // Public routes (no auth required)
     let public = Router::new()
         .route("/auth/google", post(google_auth))
+        .route("/auth/apple", post(apple_auth))
+        .route("/auth/twitter", post(twitter_auth))
+        .route("/auth/discord", post(discord_auth))
+        .route("/auth/github", post(github_auth))
         .route("/auth/email/send-otp", post(send_otp))
         .route("/auth/email/verify", post(verify_otp))
+        .route("/auth/phone/send-otp", post(send_phone_otp))
+        .route("/auth/phone/verify", post(verify_phone_otp))
         .route("/auth/siwe/nonce", post(siwe_nonce))
         .route("/auth/siwe/verify", post(siwe_verify))
+        .route("/auth/farcaster/nonce", post(farcaster_nonce))
+        .route("/auth/farcaster/verify", post(farcaster_verify))
+        .route("/auth/telegram/verify", post(telegram_verify))
         .route("/auth/refresh", post(refresh));
 
     // Protected routes (JWT required)

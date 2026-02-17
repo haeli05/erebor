@@ -6,6 +6,7 @@ members = [
     "crates/erebor-chain",
     "crates/erebor-gateway",
     "crates/erebor-common",
+    "crates/erebor-policy",
     "crates/erebor-tests",
 ]
 resolver = "2"

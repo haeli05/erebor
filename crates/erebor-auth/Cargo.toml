@@ -24,3 +24,6 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 hex = { workspace = true }
 base64 = { workspace = true }
+hmac = "0.12"
+url = "2.4"
+regex = "1.10"
