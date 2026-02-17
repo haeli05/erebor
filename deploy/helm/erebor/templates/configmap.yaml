@@ -1,0 +1,61 @@
+{{- if .Values.configMap.create -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "erebor.fullname" . }}
+  labels:
+    {{- include "erebor.labels" . | nindent 4 }}
+data:
+  {{- range $key, $value := .Values.configMap.data }}
+  {{ $key }}: |
+{{ $value | indent 4 }}
+  {{- end }}
+  
+  # Dynamic configuration based on values
+  database.conf: |
+    host = {{ include "erebor.postgresql.host" . }}
+    port = 5432
+    database = {{ .Values.postgresql.auth.database }}
+    username = {{ .Values.postgresql.auth.username }}
+    max_connections = {{ .Values.postgresql.primary.resources.limits.cpu | default "500m" | replace "m" "" | int | div 10 }}
+    connection_timeout = 30
+  
+  redis.conf: |
+    host = {{ include "erebor.redis.host" . }}
+    port = 6379
+    {{- if .Values.redis.auth.enabled }}
+    auth_enabled = true
+    {{- else }}
+    auth_enabled = false
+    {{- end }}
+    max_connections = 10
+    connection_timeout = 5
+  
+  tee.conf: |
+    platform = {{ .Values.erebor.env.TEE_PLATFORM | default "software" }}
+    require_attestation = {{ .Values.erebor.env.TEE_REQUIRE_ATTESTATION | default "false" }}
+    max_report_age = 3600
+    storage_dir = /app/cache/tee
+  
+  hsm.conf: |
+    provider = {{ .Values.erebor.env.HSM_PROVIDER | default "software" }}
+    enabled = {{ .Values.erebor.env.HSM_ENABLE | default "true" }}
+    key_hierarchy_levels = 3
+    pkcs11_library = ""
+  
+  security.conf: |
+    cors_max_age = 3600
+    rate_limit_per_minute = {{ .Values.erebor.env.CORS_ALLOWED_ORIGINS | default "*" | eq "*" | ternary 100 60 }}
+    jwt_expiry_hours = 24
+    password_hash_rounds = 12
+  
+  logging.conf: |
+    level = {{ .Values.erebor.app.logLevel | default "info" }}
+    format = json
+    {{- if .Values.erebor.app.metrics.enabled }}
+    metrics_enabled = true
+    metrics_port = {{ .Values.erebor.app.metrics.port }}
+    {{- else }}
+    metrics_enabled = false
+    {{- end }}
+{{- end }}

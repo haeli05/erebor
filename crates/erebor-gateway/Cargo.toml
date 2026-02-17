@@ -13,6 +13,7 @@ erebor-auth = { path = "../erebor-auth" }
 erebor-vault = { path = "../erebor-vault" }
 erebor-aa = { path = "../erebor-aa" }
 erebor-chain = { path = "../erebor-chain" }
+erebor-mpc = { path = "../erebor-mpc" }
 tokio = { workspace = true }
 axum = { workspace = true }
 tower = { workspace = true }

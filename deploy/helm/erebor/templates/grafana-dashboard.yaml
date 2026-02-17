@@ -1,0 +1,179 @@
+{{- if and .Values.monitoring.enabled .Values.monitoring.grafanaDashboard.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "erebor.fullname" . }}-dashboard
+  {{- if .Values.monitoring.grafanaDashboard.namespace }}
+  namespace: {{ .Values.monitoring.grafanaDashboard.namespace }}
+  {{- end }}
+  labels:
+    {{- include "erebor.labels" . | nindent 4 }}
+    {{- with .Values.monitoring.grafanaDashboard.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+    grafana_dashboard: "1"
+data:
+  erebor-dashboard.json: |
+    {
+      "dashboard": {
+        "id": null,
+        "title": "Erebor - Self-Custodial Wallet Infrastructure",
+        "description": "Monitoring dashboard for Erebor TEE/HSM wallet infrastructure",
+        "tags": ["erebor", "wallet", "tee", "hsm"],
+        "style": "dark",
+        "timezone": "browser",
+        "time": {
+          "from": "now-1h",
+          "to": "now"
+        },
+        "refresh": "5s",
+        "schemaVersion": 30,
+        "version": 1,
+        "panels": [
+          {
+            "id": 1,
+            "title": "Application Health",
+            "type": "stat",
+            "targets": [
+              {
+                "expr": "up{job=\"{{ include \"erebor.fullname\" . }}\"}",
+                "legendFormat": "{{`{{instance}}`}}"
+              }
+            ],
+            "fieldConfig": {
+              "defaults": {
+                "thresholds": {
+                  "steps": [
+                    {"color": "red", "value": 0},
+                    {"color": "green", "value": 1}
+                  ]
+                },
+                "mappings": [
+                  {"type": "value", "value": "0", "text": "Down"},
+                  {"type": "value", "value": "1", "text": "Up"}
+                ]
+              }
+            },
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+          },
+          {
+            "id": 2,
+            "title": "Request Rate",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(http_requests_total{job=\"{{ include \"erebor.fullname\" . }}\"}[5m])",
+                "legendFormat": "{{`{{method}} {{status}}`}}"
+              }
+            ],
+            "yAxes": [
+              {"label": "Requests/sec", "min": 0}
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+          },
+          {
+            "id": 3,
+            "title": "Response Time",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "histogram_quantile(0.95, rate(http_request_duration_seconds_bucket{job=\"{{ include \"erebor.fullname\" . }}\"}[5m]))",
+                "legendFormat": "95th percentile"
+              },
+              {
+                "expr": "histogram_quantile(0.50, rate(http_request_duration_seconds_bucket{job=\"{{ include \"erebor.fullname\" . }}\"}[5m]))",
+                "legendFormat": "50th percentile"
+              }
+            ],
+            "yAxes": [
+              {"label": "Seconds", "min": 0}
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+          },
+          {
+            "id": 4,
+            "title": "Memory Usage",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "process_resident_memory_bytes{job=\"{{ include \"erebor.fullname\" . }}\"}",
+                "legendFormat": "{{`{{instance}}`}}"
+              }
+            ],
+            "yAxes": [
+              {"label": "Bytes", "min": 0}
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+          },
+          {
+            "id": 5,
+            "title": "CPU Usage",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(process_cpu_seconds_total{job=\"{{ include \"erebor.fullname\" . }}\"}[5m])",
+                "legendFormat": "{{`{{instance}}`}}"
+              }
+            ],
+            "yAxes": [
+              {"label": "CPU cores", "min": 0}
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+          },
+          {
+            "id": 6,
+            "title": "TEE Operations",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(tee_attestations_total{job=\"{{ include \"erebor.fullname\" . }}\"}[5m])",
+                "legendFormat": "Attestations/sec"
+              },
+              {
+                "expr": "rate(tee_verifications_total{job=\"{{ include \"erebor.fullname\" . }}\"}[5m])",
+                "legendFormat": "Verifications/sec"
+              }
+            ],
+            "yAxes": [
+              {"label": "Operations/sec", "min": 0}
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16}
+          },
+          {
+            "id": 7,
+            "title": "HSM Operations",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "rate(hsm_key_operations_total{job=\"{{ include \"erebor.fullname\" . }}\"}[5m])",
+                "legendFormat": "{{`{{operation}}`}}/sec"
+              }
+            ],
+            "yAxes": [
+              {"label": "Operations/sec", "min": 0}
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+          },
+          {
+            "id": 8,
+            "title": "Database Connections",
+            "type": "graph",
+            "targets": [
+              {
+                "expr": "db_connections_active{job=\"{{ include \"erebor.fullname\" . }}\"}",
+                "legendFormat": "Active"
+              },
+              {
+                "expr": "db_connections_idle{job=\"{{ include \"erebor.fullname\" . }}\"}",
+                "legendFormat": "Idle"
+              }
+            ],
+            "yAxes": [
+              {"label": "Connections", "min": 0}
+            ],
+            "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+          }
+        ]
+      }
+    }
+{{- end }}

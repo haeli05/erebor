@@ -1,0 +1,76 @@
+[package]
+name = "erebor-tee"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+# Workspace dependencies
+erebor-common = { path = "../erebor-common" }
+
+# External dependencies
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+hex = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+zeroize = { workspace = true }
+
+# Cryptographic dependencies
+aes-gcm = { workspace = true }
+sha2 = { workspace = true }
+rand = { workspace = true }
+k256 = { workspace = true }
+hkdf = { workspace = true }
+
+# Additional dependencies
+async-trait = { workspace = true }
+bincode = { workspace = true }
+
+# TEE-specific dependencies
+pkcs11 = "0.5"                    # PKCS#11 for HSM support
+openssl = { version = "0.10", features = ["vendored"] }  # For crypto operations
+x509-parser = "0.15"             # X.509 certificate parsing
+der = "0.7"                      # DER encoding/decoding
+# webpki = "0.22"                  # Web PKI certificate validation
+# ring = "0.17"                    # Additional crypto primitives
+
+# Optional SGX dependencies (conditional compilation - disabled for now)
+# [dependencies.sgx_types]
+# version = "2.0"
+# optional = true
+
+# [dependencies.sgx_urts]
+# version = "2.0"
+# optional = true
+
+# [dependencies.sgx_dcap_ql]
+# version = "1.0"
+# optional = true
+
+# AWS Nitro Enclaves dependencies (disabled for now)
+# aws-nitro-enclaves-cose = { version = "0.4", optional = true }
+# aws-nitro-enclaves-nsm-api = { version = "0.3", optional = true }
+
+[features]
+default = ["software-hsm"]
+sgx = []
+nitro = []
+software-hsm = []
+yubihsm = []
+aws-cloudhsm = []
+azure-hsm = []
+
+# [dependencies.yubihsm-sys]
+# version = "0.43"
+# optional = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio-test = "0.4"

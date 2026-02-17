@@ -1,0 +1,30 @@
+apiVersion: v2
+name: erebor
+description: A Helm chart for Erebor - Self-custodial wallet infrastructure with TEE and HSM support
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/haeli05/erebor
+sources:
+  - https://github.com/haeli05/erebor
+maintainers:
+  - name: Hao Li
+    email: hj@chateau.capital
+keywords:
+  - wallet
+  - cryptocurrency
+  - self-custodial
+  - tee
+  - hsm
+  - key-management
+annotations:
+  category: Fintech
+dependencies:
+  - name: postgresql
+    version: "15.5.32"
+    repository: https://charts.bitnami.com/bitnami
+    condition: postgresql.enabled
+  - name: redis
+    version: "19.6.4"
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled

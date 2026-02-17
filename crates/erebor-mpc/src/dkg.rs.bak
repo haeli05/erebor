@@ -1,0 +1,502 @@
+//! Distributed Key Generation (DKG) implementation based on CGGMP21
+//!
+//! This module implements the key generation phase of the CGGMP21 protocol,
+//! including Feldman VSS and ZK proofs for protocol correctness.
+
+use crate::types::*;
+use crate::errors::{MpcError, Result};
+
+use k256::{
+    ecdsa::{SigningKey, VerifyingKey},
+    ProjectivePoint, Scalar, AffinePoint,
+};
+use paillier::{EncryptionKey, DecryptionKey, Paillier, RawCiphertext, RawPlaintext};
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+use tracing::{info, debug, warn};
+
+/// DKG participant state
+#[derive(Debug)]
+pub struct DkgParticipant {
+    pub party_id: PartyId,
+    pub threshold: Threshold,
+    pub parties: Vec<PartyId>,
+    pub session_id: SessionId,
+    
+    // Paillier keys for each party
+    pub paillier_keys: HashMap<PartyId, (EncryptionKey, Option<DecryptionKey>)>,
+    
+    // VSS commitments and shares
+    pub commitments: HashMap<PartyId, Vec<ProjectivePoint>>,
+    pub received_shares: HashMap<PartyId, Scalar>,
+    
+    // Final key material
+    pub private_share: Option<PrivateKeyShare>,
+    pub public_shares: HashMap<PartyId, PublicKeyShare>,
+    pub group_public_key: Option<VerifyingKey>,
+}
+
+/// VSS (Verifiable Secret Sharing) commitment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VssCommitment {
+    pub party_id: PartyId,
+    pub session_id: SessionId,
+    pub commitments: Vec<ProjectivePoint>,
+}
+
+/// Secret share with ZK proof
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct SecretShare {
+    pub from_party: PartyId,
+    pub to_party: PartyId,
+    pub session_id: SessionId,
+    pub encrypted_share: Vec<u8>, // Paillier encrypted
+    pub zk_proof: SchnorrProof,
+}
+
+/// Schnorr proof for discrete logarithm
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SchnorrProof {
+    pub commitment: ProjectivePoint,
+    pub challenge: Scalar,
+    pub response: Scalar,
+}
+
+impl DkgParticipant {
+    /// Create a new DKG participant
+    pub fn new(
+        party_id: PartyId,
+        threshold: Threshold,
+        parties: Vec<PartyId>,
+        session_id: SessionId,
+    ) -> Result<Self> {
+        if threshold == 0 || threshold as usize > parties.len() {
+            return Err(MpcError::InvalidThreshold {
+                actual: threshold,
+                max: parties.len() as u32,
+            }.into());
+        }
+
+        if parties.len() < threshold as usize {
+            return Err(MpcError::InsufficientParties {
+                actual: parties.len(),
+                required: threshold as usize,
+            }.into());
+        }
+
+        Ok(Self {
+            party_id,
+            threshold,
+            parties,
+            session_id,
+            paillier_keys: HashMap::new(),
+            commitments: HashMap::new(),
+            received_shares: HashMap::new(),
+            private_share: None,
+            public_shares: HashMap::new(),
+            group_public_key: None,
+        })
+    }
+
+    /// Generate Paillier keypair for this participant
+    pub fn generate_paillier_keys<R: CryptoRng + RngCore>(&mut self, rng: &mut R) -> Result<EncryptionKey> {
+        let (ek, dk) = Paillier::keypair_safe_primes(rng, 2048)
+            .map_err(|e| MpcError::CryptographicError(format!("Paillier keygen failed: {}", e)))?;
+        
+        self.paillier_keys.insert(self.party_id, (ek.clone(), Some(dk)));
+        info!("Generated Paillier keypair for party {}", self.party_id);
+        
+        Ok(ek)
+    }
+
+    /// Add Paillier public key from another participant
+    pub fn add_paillier_public_key(&mut self, party_id: PartyId, public_key: EncryptionKey) {
+        self.paillier_keys.insert(party_id, (public_key, None));
+        debug!("Added Paillier public key for party {}", party_id);
+    }
+
+    /// Generate VSS polynomial and commitments
+    pub fn generate_vss_commitments<R: CryptoRng + RngCore>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(VssCommitment, Vec<SecretShare>)> {
+        // Generate random polynomial coefficients
+        let mut coefficients = Vec::with_capacity(self.threshold as usize);
+        for _ in 0..self.threshold {
+            coefficients.push(Scalar::random(rng));
+        }
+
+        // Compute commitments to coefficients (Feldman VSS)
+        let mut commitments = Vec::with_capacity(self.threshold as usize);
+        for coeff in &coefficients {
+            commitments.push(ProjectivePoint::GENERATOR * coeff);
+        }
+
+        let vss_commitment = VssCommitment {
+            party_id: self.party_id,
+            session_id: self.session_id,
+            commitments: commitments.clone(),
+        };
+
+        // Store our commitments
+        self.commitments.insert(self.party_id, commitments);
+
+        // Generate shares for each party
+        let mut secret_shares = Vec::new();
+        for &party_id in &self.parties {
+            if party_id == self.party_id {
+                continue; // Don't create share for ourselves
+            }
+
+            // Evaluate polynomial at party_id
+            let x = Scalar::from(party_id);
+            let mut y = coefficients[0]; // a0
+            let mut x_power = x; // x^1
+            
+            for i in 1..coefficients.len() {
+                y += coefficients[i] * x_power;
+                x_power *= x;
+            }
+
+            // Get Paillier public key for the recipient
+            let (paillier_pk, _) = self.paillier_keys.get(&party_id)
+                .ok_or(MpcError::PartyNotFound { party_id })?;
+
+            // Encrypt the share using Paillier
+            let plaintext = RawPlaintext::from(y.to_bytes().as_slice());
+            let encrypted_share = Paillier::encrypt(paillier_pk, plaintext)
+                .map_err(|e| MpcError::CryptographicError(format!("Paillier encryption failed: {}", e)))?;
+
+            // Generate ZK proof that we know the discrete log
+            let zk_proof = self.generate_schnorr_proof(&y, rng)?;
+
+            secret_shares.push(SecretShare {
+                from_party: self.party_id,
+                to_party: party_id,
+                session_id: self.session_id,
+                encrypted_share: encrypted_share.0.to_vec(),
+                zk_proof,
+            });
+        }
+
+        // Evaluate polynomial for ourselves
+        let x = Scalar::from(self.party_id);
+        let mut y = coefficients[0];
+        let mut x_power = x;
+        
+        for i in 1..coefficients.len() {
+            y += coefficients[i] * x_power;
+            x_power *= x;
+        }
+        
+        self.received_shares.insert(self.party_id, y);
+
+        info!("Generated VSS commitments and {} secret shares", secret_shares.len());
+        Ok((vss_commitment, secret_shares))
+    }
+
+    /// Verify and process received VSS commitment
+    pub fn process_vss_commitment(&mut self, commitment: VssCommitment) -> Result<()> {
+        if commitment.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: commitment.session_id }.into());
+        }
+
+        if commitment.commitments.len() != self.threshold as usize {
+            return Err(MpcError::InvalidPartyConfiguration.into());
+        }
+
+        self.commitments.insert(commitment.party_id, commitment.commitments);
+        debug!("Processed VSS commitment from party {}", commitment.party_id);
+        Ok(())
+    }
+
+    /// Verify and process received secret share
+    pub fn process_secret_share(&mut self, share: SecretShare) -> Result<()> {
+        if share.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: share.session_id }.into());
+        }
+
+        if share.to_party != self.party_id {
+            return Err(MpcError::PartyNotFound { party_id: share.to_party }.into());
+        }
+
+        // Verify ZK proof
+        if !self.verify_schnorr_proof(&share.zk_proof)? {
+            return Err(MpcError::CryptographicError("Invalid ZK proof".to_string()).into());
+        }
+
+        // Decrypt the share using our Paillier private key
+        let (_, paillier_sk) = self.paillier_keys.get(&self.party_id)
+            .ok_or(MpcError::PartyNotFound { party_id: self.party_id })?;
+        
+        let paillier_sk = paillier_sk.as_ref()
+            .ok_or(MpcError::CryptographicError("Missing Paillier private key".to_string()))?;
+
+        let ciphertext = RawCiphertext::from(share.encrypted_share.as_slice());
+        let plaintext = Paillier::decrypt(paillier_sk, ciphertext)
+            .map_err(|e| MpcError::CryptographicError(format!("Paillier decryption failed: {}", e)))?;
+
+        let share_bytes: [u8; 32] = plaintext.0.as_slice().try_into()
+            .map_err(|_| MpcError::CryptographicError("Invalid share length".to_string()))?;
+        
+        let scalar_share = Scalar::from_bytes(&share_bytes.into())
+            .into_option()
+            .ok_or(MpcError::CryptographicError("Invalid scalar share".to_string()))?;
+
+        // Verify share against VSS commitment
+        let commitments = self.commitments.get(&share.from_party)
+            .ok_or(MpcError::PartyNotFound { party_id: share.from_party })?;
+
+        if !self.verify_share_commitment(self.party_id, scalar_share, commitments)? {
+            return Err(MpcError::CryptographicError("Share verification failed".to_string()).into());
+        }
+
+        self.received_shares.insert(share.from_party, scalar_share);
+        debug!("Processed secret share from party {}", share.from_party);
+        Ok(())
+    }
+
+    /// Finalize DKG and generate the final key shares
+    pub fn finalize_dkg(&mut self) -> Result<DkgResult> {
+        // Check we have all required commitments and shares
+        if self.commitments.len() != self.parties.len() {
+            return Err(MpcError::InsufficientParties {
+                actual: self.commitments.len(),
+                required: self.parties.len(),
+            }.into());
+        }
+
+        if self.received_shares.len() != self.parties.len() {
+            return Err(MpcError::InsufficientParties {
+                actual: self.received_shares.len(),
+                required: self.parties.len(),
+            }.into());
+        }
+
+        // Compute our private key share (sum of all received shares)
+        let mut private_share_scalar = Scalar::ZERO;
+        for (_, share) in &self.received_shares {
+            private_share_scalar += share;
+        }
+
+        // Compute the group public key (sum of all commitment[0])
+        let mut group_public_key_point = ProjectivePoint::IDENTITY;
+        for (_, commitments) in &self.commitments {
+            group_public_key_point += commitments[0];
+        }
+
+        let group_public_key = VerifyingKey::from_affine(
+            AffinePoint::from(group_public_key_point)
+        ).map_err(|e| MpcError::CryptographicError(format!("Invalid group public key: {}", e)))?;
+
+        // Generate public shares for each party
+        let mut public_shares = HashMap::new();
+        for &party_id in &self.parties {
+            let commitments = self.commitments.get(&party_id).unwrap();
+            let public_key_point = commitments[0];
+            let public_key = VerifyingKey::from_affine(
+                AffinePoint::from(public_key_point)
+            ).map_err(|e| MpcError::CryptographicError(format!("Invalid public key for party {}: {}", party_id, e)))?;
+
+            public_shares.insert(party_id, PublicKeyShare {
+                party_id,
+                public_key,
+                commitment: commitments.clone(),
+            });
+        }
+
+        let private_share = PrivateKeyShare {
+            party_id: self.party_id,
+            share: private_share_scalar,
+            nonce_shares: HashMap::new(),
+        };
+
+        self.private_share = Some(private_share.clone());
+        self.public_shares = public_shares.clone();
+        self.group_public_key = Some(group_public_key);
+
+        info!("DKG finalized successfully for party {}", self.party_id);
+
+        Ok(DkgResult {
+            public_key: group_public_key,
+            private_share,
+            public_shares,
+            session_id: self.session_id,
+        })
+    }
+
+    /// Generate Schnorr proof of knowledge for a scalar
+    fn generate_schnorr_proof<R: CryptoRng + RngCore>(&self, secret: &Scalar, rng: &mut R) -> Result<SchnorrProof> {
+        // Choose random nonce
+        let r = Scalar::random(rng);
+        let commitment = ProjectivePoint::GENERATOR * r;
+
+        // Create challenge (Fiat-Shamir)
+        let public_point = ProjectivePoint::GENERATOR * secret;
+        let challenge = self.hash_to_scalar(&[
+            commitment.to_affine().to_encoded_point(true).as_bytes(),
+            public_point.to_affine().to_encoded_point(true).as_bytes(),
+        ])?;
+
+        // Compute response
+        let response = r + challenge * secret;
+
+        Ok(SchnorrProof {
+            commitment,
+            challenge,
+            response,
+        })
+    }
+
+    /// Verify Schnorr proof
+    fn verify_schnorr_proof(&self, proof: &SchnorrProof) -> Result<bool> {
+        // Recompute public key from the proof
+        let public_point = ProjectivePoint::GENERATOR * proof.response - proof.commitment * proof.challenge;
+
+        // Recompute challenge
+        let expected_challenge = self.hash_to_scalar(&[
+            proof.commitment.to_affine().to_encoded_point(true).as_bytes(),
+            public_point.to_affine().to_encoded_point(true).as_bytes(),
+        ])?;
+
+        Ok(proof.challenge == expected_challenge)
+    }
+
+    /// Verify that a share corresponds to the VSS commitment
+    fn verify_share_commitment(
+        &self,
+        party_id: PartyId,
+        share: Scalar,
+        commitments: &[ProjectivePoint],
+    ) -> Result<bool> {
+        // Compute g^share
+        let share_commitment = ProjectivePoint::GENERATOR * share;
+
+        // Compute expected commitment using Lagrange interpolation
+        let x = Scalar::from(party_id);
+        let mut expected = commitments[0]; // C_0
+        let mut x_power = x; // x^1
+
+        for i in 1..commitments.len() {
+            expected += commitments[i] * x_power;
+            x_power *= x;
+        }
+
+        Ok(share_commitment == expected)
+    }
+
+    /// Hash data to a scalar (for Fiat-Shamir)
+    fn hash_to_scalar(&self, data: &[&[u8]]) -> Result<Scalar> {
+        use sha2::{Sha256, Digest};
+        
+        let mut hasher = Sha256::new();
+        for d in data {
+            hasher.update(d);
+        }
+        let hash = hasher.finalize();
+
+        // Convert hash to scalar
+        Scalar::from_bytes_reduced(&hash.into()).into()
+    }
+}
+
+/// Coordinator for managing a DKG session across multiple parties
+pub struct DkgCoordinator {
+    pub session_id: SessionId,
+    pub threshold: Threshold,
+    pub parties: Vec<PartyId>,
+    pub commitments: HashMap<PartyId, VssCommitment>,
+    pub shares: HashMap<(PartyId, PartyId), SecretShare>, // (from, to) -> share
+}
+
+impl DkgCoordinator {
+    /// Create a new DKG coordinator
+    pub fn new(session_id: SessionId, threshold: Threshold, parties: Vec<PartyId>) -> Self {
+        Self {
+            session_id,
+            threshold,
+            parties,
+            commitments: HashMap::new(),
+            shares: HashMap::new(),
+        }
+    }
+
+    /// Add a VSS commitment from a party
+    pub fn add_commitment(&mut self, commitment: VssCommitment) -> Result<()> {
+        if commitment.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: commitment.session_id }.into());
+        }
+
+        self.commitments.insert(commitment.party_id, commitment);
+        Ok(())
+    }
+
+    /// Add a secret share
+    pub fn add_share(&mut self, share: SecretShare) -> Result<()> {
+        if share.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: share.session_id }.into());
+        }
+
+        self.shares.insert((share.from_party, share.to_party), share);
+        Ok(())
+    }
+
+    /// Check if DKG is complete
+    pub fn is_complete(&self) -> bool {
+        self.commitments.len() == self.parties.len() &&
+        self.shares.len() == self.parties.len() * (self.parties.len() - 1)
+    }
+
+    /// Get all commitments
+    pub fn get_commitments(&self) -> Vec<&VssCommitment> {
+        self.commitments.values().collect()
+    }
+
+    /// Get shares for a specific party
+    pub fn get_shares_for_party(&self, party_id: PartyId) -> Vec<&SecretShare> {
+        self.shares.values()
+            .filter(|share| share.to_party == party_id)
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::OsRng;
+
+    #[tokio::test]
+    async fn test_dkg_single_party() {
+        let mut rng = OsRng;
+        let session_id = Uuid::new_v4();
+        let parties = vec![1];
+        let threshold = 1;
+
+        let mut participant = DkgParticipant::new(1, threshold, parties, session_id).unwrap();
+        let paillier_pk = participant.generate_paillier_keys(&mut rng).unwrap();
+        participant.add_paillier_public_key(1, paillier_pk);
+
+        let (commitment, shares) = participant.generate_vss_commitments(&mut rng).unwrap();
+        assert_eq!(shares.len(), 0); // No shares for other parties
+        
+        participant.process_vss_commitment(commitment).unwrap();
+        let result = participant.finalize_dkg().unwrap();
+        
+        assert_eq!(result.session_id, session_id);
+        assert_eq!(result.private_share.party_id, 1);
+    }
+
+    #[tokio::test]
+    async fn test_dkg_coordinator() {
+        let session_id = Uuid::new_v4();
+        let parties = vec![1, 2, 3];
+        let threshold = 2;
+
+        let coordinator = DkgCoordinator::new(session_id, threshold, parties);
+        assert!(!coordinator.is_complete());
+        assert_eq!(coordinator.get_commitments().len(), 0);
+    }
+}

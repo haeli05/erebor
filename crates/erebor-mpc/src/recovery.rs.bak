@@ -1,0 +1,650 @@
+//! Social Recovery System for Erebor MPC
+//!
+//! This module implements a social recovery system that allows users to
+//! recover their wallet access through trusted guardians using threshold
+//! secret sharing and time-locked recovery processes.
+
+use crate::types::*;
+use crate::errors::{RecoveryError, Result};
+
+use sharks::{Sharks, Share};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
+use chrono::{DateTime, Utc, Duration};
+use k256::ecdsa::{SigningKey, VerifyingKey, Signature};
+use rand::{CryptoRng, RngCore};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+use tracing::{info, debug, warn, error};
+
+/// Recovery system manager
+#[derive(Debug)]
+pub struct RecoveryManager {
+    /// Active recovery requests
+    pub active_requests: HashMap<Uuid, RecoveryRequest>,
+    /// Guardian database
+    pub guardians: HashMap<Uuid, Guardian>,
+    /// User guardian mappings
+    pub user_guardians: HashMap<Uuid, Vec<Uuid>>, // user_id -> guardian_ids
+    /// Recovery shares cache
+    pub recovery_shares: HashMap<Uuid, Vec<RecoveryShare>>, // request_id -> shares
+}
+
+/// Individual recovery share for secret sharing
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct RecoveryShare {
+    pub guardian_id: Uuid,
+    pub share_data: Vec<u8>, // Encrypted with guardian's key
+    pub share_index: u8,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Guardian's cryptographic proof for recovery approval
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardianProof {
+    pub guardian_id: Uuid,
+    pub recovery_request_id: Uuid,
+    pub signature: Vec<u8>,
+    pub public_key: VerifyingKey,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Recovery policy configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryPolicy {
+    pub min_guardians: u32,
+    pub required_approvals: u32,
+    pub timelock_hours: u64,
+    pub cooldown_hours: u64,
+    pub max_attempts_per_day: u32,
+}
+
+impl Default for RecoveryPolicy {
+    fn default() -> Self {
+        Self {
+            min_guardians: 3,
+            required_approvals: 2,
+            timelock_hours: 48,
+            cooldown_hours: 24,
+            max_attempts_per_day: 3,
+        }
+    }
+}
+
+impl RecoveryManager {
+    /// Create a new recovery manager
+    pub fn new() -> Self {
+        Self {
+            active_requests: HashMap::new(),
+            guardians: HashMap::new(),
+            user_guardians: HashMap::new(),
+            recovery_shares: HashMap::new(),
+        }
+    }
+
+    /// Add a guardian for a user
+    pub fn add_guardian(
+        &mut self,
+        user_id: Uuid,
+        guardian_type: GuardianType,
+        contact_info: String,
+        public_key: Option<VerifyingKey>,
+    ) -> Result<Uuid> {
+        let guardian_id = Uuid::new_v4();
+        
+        let guardian = Guardian {
+            id: guardian_id,
+            guardian_type,
+            contact_info,
+            public_key,
+            added_at: Utc::now(),
+            active: true,
+        };
+
+        self.guardians.insert(guardian_id, guardian);
+        
+        // Add to user's guardian list
+        self.user_guardians.entry(user_id)
+            .or_insert_with(Vec::new)
+            .push(guardian_id);
+
+        info!("Added guardian {} for user {}", guardian_id, user_id);
+        Ok(guardian_id)
+    }
+
+    /// Remove a guardian
+    pub fn remove_guardian(&mut self, user_id: Uuid, guardian_id: Uuid) -> Result<()> {
+        // Deactivate guardian
+        if let Some(guardian) = self.guardians.get_mut(&guardian_id) {
+            guardian.active = false;
+        }
+
+        // Remove from user's guardian list
+        if let Some(guardian_list) = self.user_guardians.get_mut(&user_id) {
+            guardian_list.retain(|&id| id != guardian_id);
+        }
+
+        info!("Removed guardian {} for user {}", guardian_id, user_id);
+        Ok(())
+    }
+
+    /// Distribute recovery shares among guardians
+    pub fn setup_recovery_shares<R: CryptoRng + RngCore>(
+        &mut self,
+        user_id: Uuid,
+        secret_data: &[u8],
+        threshold: u8,
+        rng: &mut R,
+    ) -> Result<()> {
+        let guardian_ids = self.user_guardians.get(&user_id)
+            .ok_or(RecoveryError::BaselineNotFound { user_id })?;
+
+        if guardian_ids.is_empty() {
+            return Err(RecoveryError::InsufficientApprovals {
+                actual: 0,
+                required: threshold as u32,
+            }.into());
+        }
+
+        let active_guardians: Vec<_> = guardian_ids.iter()
+            .filter(|&id| {
+                self.guardians.get(id)
+                    .map(|g| g.active)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        if active_guardians.len() < threshold as usize {
+            return Err(RecoveryError::InsufficientApprovals {
+                actual: active_guardians.len() as u32,
+                required: threshold as u32,
+            }.into());
+        }
+
+        // Create Shamir secret shares
+        let sharks = Sharks(threshold);
+        let dealer = sharks.dealer(secret_data);
+        let shares: Vec<Share> = dealer.take(active_guardians.len()).collect();
+
+        // Create recovery shares for each guardian
+        let recovery_shares: Vec<RecoveryShare> = shares.into_iter()
+            .zip(active_guardians.iter())
+            .enumerate()
+            .map(|(index, (share, &guardian_id))| {
+                // In practice, encrypt with guardian's public key
+                let share_data = share.as_bytes().to_vec();
+
+                RecoveryShare {
+                    guardian_id,
+                    share_data,
+                    share_index: index as u8 + 1,
+                    created_at: Utc::now(),
+                }
+            })
+            .collect();
+
+        // Store recovery shares (in practice, distribute to guardians)
+        let temp_request_id = Uuid::new_v4(); // Temporary for shares storage
+        self.recovery_shares.insert(temp_request_id, recovery_shares);
+
+        info!("Setup recovery shares for user {} with {} guardians", user_id, active_guardians.len());
+        Ok(())
+    }
+
+    /// Initiate recovery process
+    pub fn initiate_recovery(
+        &mut self,
+        user_id: Uuid,
+        policy: RecoveryPolicy,
+    ) -> Result<RecoveryRequest> {
+        // Check for existing active recovery
+        for request in self.active_requests.values() {
+            if request.user_id == user_id && 
+               matches!(request.status, RecoveryStatus::Pending | RecoveryStatus::Approved) {
+                return Err(RecoveryError::RecoveryInProgress { user_id }.into());
+            }
+        }
+
+        let guardian_ids = self.user_guardians.get(&user_id)
+            .ok_or(RecoveryError::BaselineNotFound { user_id })?;
+
+        let active_guardians: Vec<_> = guardian_ids.iter()
+            .filter(|&id| {
+                self.guardians.get(id)
+                    .map(|g| g.active)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+
+        if active_guardians.len() < policy.min_guardians as usize {
+            return Err(RecoveryError::InsufficientApprovals {
+                actual: active_guardians.len() as u32,
+                required: policy.min_guardians,
+            }.into());
+        }
+
+        let request_id = Uuid::new_v4();
+        let now = Utc::now();
+        let expires_at = now + Duration::hours(policy.timelock_hours as i64);
+
+        let request = RecoveryRequest {
+            id: request_id,
+            user_id,
+            threshold: policy.required_approvals,
+            total_guardians: active_guardians.len() as u32,
+            initiated_at: now,
+            expires_at,
+            status: RecoveryStatus::Pending,
+            approvals: Vec::new(),
+            recovery_data: None,
+        };
+
+        self.active_requests.insert(request_id, request.clone());
+
+        info!("Initiated recovery request {} for user {}", request_id, user_id);
+        Ok(request)
+    }
+
+    /// Guardian approves recovery request
+    pub fn approve_recovery(
+        &mut self,
+        recovery_request_id: Uuid,
+        guardian_id: Uuid,
+        signature: Option<Vec<u8>>,
+        ip_address: Option<String>,
+    ) -> Result<()> {
+        let request = self.active_requests.get_mut(&recovery_request_id)
+            .ok_or(RecoveryError::RequestNotFound { request_id: recovery_request_id })?;
+
+        if request.status != RecoveryStatus::Pending {
+            return Err(RecoveryError::RequestExpired { request_id: recovery_request_id }.into());
+        }
+
+        if Utc::now() > request.expires_at {
+            request.status = RecoveryStatus::Expired;
+            return Err(RecoveryError::RequestExpired { request_id: recovery_request_id }.into());
+        }
+
+        let guardian = self.guardians.get(&guardian_id)
+            .ok_or(RecoveryError::GuardianNotFound { guardian_id })?;
+
+        if !guardian.active {
+            return Err(RecoveryError::GuardianInactive { guardian_id }.into());
+        }
+
+        // Check if already approved
+        if request.approvals.iter().any(|a| a.guardian_id == guardian_id) {
+            warn!("Guardian {} already approved recovery {}", guardian_id, recovery_request_id);
+            return Ok(());
+        }
+
+        // Verify signature if provided
+        if let (Some(sig), Some(pub_key)) = (&signature, &guardian.public_key) {
+            if !self.verify_guardian_signature(recovery_request_id, pub_key, sig)? {
+                return Err(RecoveryError::InvalidGuardianSignature.into());
+            }
+        }
+
+        let approval = GuardianApproval {
+            guardian_id,
+            approved: true,
+            signature,
+            approved_at: Utc::now(),
+            ip_address,
+        };
+
+        request.approvals.push(approval);
+
+        // Check if we have enough approvals
+        if request.approvals.len() >= request.threshold as usize {
+            request.status = RecoveryStatus::Approved;
+            info!("Recovery request {} approved with {} approvals", recovery_request_id, request.approvals.len());
+        }
+
+        debug!("Guardian {} approved recovery {}", guardian_id, recovery_request_id);
+        Ok(())
+    }
+
+    /// Reject recovery request
+    pub fn reject_recovery(
+        &mut self,
+        recovery_request_id: Uuid,
+        guardian_id: Uuid,
+        signature: Option<Vec<u8>>,
+    ) -> Result<()> {
+        let request = self.active_requests.get_mut(&recovery_request_id)
+            .ok_or(RecoveryError::RequestNotFound { request_id: recovery_request_id })?;
+
+        if request.status != RecoveryStatus::Pending {
+            return Err(RecoveryError::RequestExpired { request_id: recovery_request_id }.into());
+        }
+
+        let guardian = self.guardians.get(&guardian_id)
+            .ok_or(RecoveryError::GuardianNotFound { guardian_id })?;
+
+        if !guardian.active {
+            return Err(RecoveryError::GuardianInactive { guardian_id }.into());
+        }
+
+        // Verify signature if provided
+        if let (Some(sig), Some(pub_key)) = (&signature, &guardian.public_key) {
+            if !self.verify_guardian_signature(recovery_request_id, pub_key, sig)? {
+                return Err(RecoveryError::InvalidGuardianSignature.into());
+            }
+        }
+
+        let rejection = GuardianApproval {
+            guardian_id,
+            approved: false,
+            signature,
+            approved_at: Utc::now(),
+            ip_address: None,
+        };
+
+        request.approvals.push(rejection);
+        request.status = RecoveryStatus::Rejected;
+
+        info!("Guardian {} rejected recovery {}", guardian_id, recovery_request_id);
+        Ok(())
+    }
+
+    /// Execute recovery and reconstruct secret
+    pub fn execute_recovery(&mut self, recovery_request_id: Uuid) -> Result<Vec<u8>> {
+        let request = self.active_requests.get_mut(&recovery_request_id)
+            .ok_or(RecoveryError::RequestNotFound { request_id: recovery_request_id })?;
+
+        if request.status != RecoveryStatus::Approved {
+            return Err(RecoveryError::InsufficientApprovals {
+                actual: request.approvals.iter().filter(|a| a.approved).count() as u32,
+                required: request.threshold,
+            }.into());
+        }
+
+        // Check timelock (must wait minimum time)
+        let time_since_initiation = Utc::now() - request.initiated_at;
+        if time_since_initiation < Duration::hours(48) { // Minimum 48h timelock
+            return Err(RecoveryError::RecoveryCooldown {
+                cooldown_until: request.initiated_at + Duration::hours(48),
+            }.into());
+        }
+
+        // Get approved guardians
+        let approved_guardians: Vec<_> = request.approvals.iter()
+            .filter(|a| a.approved)
+            .map(|a| a.guardian_id)
+            .collect();
+
+        if approved_guardians.len() < request.threshold as usize {
+            return Err(RecoveryError::InsufficientApprovals {
+                actual: approved_guardians.len() as u32,
+                required: request.threshold,
+            }.into());
+        }
+
+        // Reconstruct secret from shares
+        let secret_data = self.reconstruct_secret_from_guardians(&approved_guardians, request.threshold as u8)?;
+
+        request.status = RecoveryStatus::Completed;
+        request.recovery_data = Some(secret_data.clone());
+
+        info!("Successfully executed recovery for request {}", recovery_request_id);
+        Ok(secret_data)
+    }
+
+    /// Cancel recovery request
+    pub fn cancel_recovery(&mut self, recovery_request_id: Uuid) -> Result<()> {
+        if let Some(request) = self.active_requests.get_mut(&recovery_request_id) {
+            request.status = RecoveryStatus::Rejected;
+            info!("Cancelled recovery request {}", recovery_request_id);
+        }
+        Ok(())
+    }
+
+    /// Get recovery request status
+    pub fn get_recovery_status(&self, recovery_request_id: Uuid) -> Option<&RecoveryRequest> {
+        self.active_requests.get(&recovery_request_id)
+    }
+
+    /// Get user's guardians
+    pub fn get_user_guardians(&self, user_id: Uuid) -> Vec<&Guardian> {
+        self.user_guardians.get(&user_id)
+            .map(|guardian_ids| {
+                guardian_ids.iter()
+                    .filter_map(|id| self.guardians.get(id))
+                    .filter(|g| g.active)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Clean up expired recovery requests
+    pub fn cleanup_expired_requests(&mut self) {
+        let now = Utc::now();
+        let mut expired_requests = Vec::new();
+
+        for (request_id, request) in &mut self.active_requests {
+            if now > request.expires_at && request.status == RecoveryStatus::Pending {
+                request.status = RecoveryStatus::Expired;
+                expired_requests.push(*request_id);
+            }
+        }
+
+        for request_id in expired_requests {
+            debug!("Recovery request {} expired", request_id);
+        }
+    }
+
+    /// Verify guardian's signature on recovery request
+    fn verify_guardian_signature(
+        &self,
+        recovery_request_id: Uuid,
+        public_key: &VerifyingKey,
+        signature: &[u8],
+    ) -> Result<bool> {
+        // Create message to sign (recovery request ID)
+        let message = recovery_request_id.as_bytes();
+
+        // Parse signature
+        let sig = Signature::from_slice(signature)
+            .map_err(|_| RecoveryError::InvalidGuardianSignature)?;
+
+        // Verify signature
+        public_key.verify(message, &sig)
+            .map(|_| true)
+            .map_err(|_| RecoveryError::InvalidGuardianSignature.into())
+    }
+
+    /// Reconstruct secret from guardian shares
+    fn reconstruct_secret_from_guardians(
+        &self,
+        approved_guardians: &[Uuid],
+        threshold: u8,
+    ) -> Result<Vec<u8>> {
+        // Find recovery shares for these guardians
+        // In this simplified implementation, we use the first available shares
+        let recovery_shares_entry = self.recovery_shares.values().next()
+            .ok_or(RecoveryError::ShareReconstructionFailed("No recovery shares found".to_string()))?;
+
+        let relevant_shares: Vec<_> = recovery_shares_entry.iter()
+            .filter(|share| approved_guardians.contains(&share.guardian_id))
+            .take(threshold as usize)
+            .collect();
+
+        if relevant_shares.len() < threshold as usize {
+            return Err(RecoveryError::ShareReconstructionFailed(
+                format!("Insufficient shares: got {}, need {}", relevant_shares.len(), threshold)
+            ).into());
+        }
+
+        // Reconstruct using Shamir secret sharing
+        let sharks = Sharks(threshold);
+        let shares: Result<Vec<Share>, _> = relevant_shares.iter()
+            .map(|recovery_share| {
+                Share::try_from(recovery_share.share_data.as_slice())
+                    .map_err(|e| RecoveryError::ShareReconstructionFailed(format!("Invalid share: {}", e)))
+            })
+            .collect();
+
+        let shares = shares?;
+        let secret = sharks.recover(&shares)
+            .map_err(|e| RecoveryError::ShareReconstructionFailed(format!("Recovery failed: {}", e)))?;
+
+        Ok(secret)
+    }
+}
+
+/// Guardian notification system
+pub struct GuardianNotifier {
+    /// Notification handlers by guardian type
+    handlers: HashMap<GuardianType, Box<dyn GuardianNotificationHandler>>,
+}
+
+/// Trait for handling guardian notifications
+pub trait GuardianNotificationHandler: Send + Sync {
+    fn notify_recovery_request(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()>;
+    fn notify_recovery_approved(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()>;
+    fn notify_recovery_completed(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()>;
+}
+
+/// Email notification handler
+pub struct EmailNotificationHandler;
+
+impl GuardianNotificationHandler for EmailNotificationHandler {
+    fn notify_recovery_request(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()> {
+        info!("EMAIL: Recovery request {} for guardian {}", request.id, guardian.id);
+        // Implementation would send actual email
+        Ok(())
+    }
+
+    fn notify_recovery_approved(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()> {
+        info!("EMAIL: Recovery approved {} for guardian {}", request.id, guardian.id);
+        Ok(())
+    }
+
+    fn notify_recovery_completed(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()> {
+        info!("EMAIL: Recovery completed {} for guardian {}", request.id, guardian.id);
+        Ok(())
+    }
+}
+
+/// SMS notification handler
+pub struct SmsNotificationHandler;
+
+impl GuardianNotificationHandler for SmsNotificationHandler {
+    fn notify_recovery_request(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()> {
+        info!("SMS: Recovery request {} for guardian {}", request.id, guardian.id);
+        // Implementation would send actual SMS
+        Ok(())
+    }
+
+    fn notify_recovery_approved(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()> {
+        info!("SMS: Recovery approved {} for guardian {}", request.id, guardian.id);
+        Ok(())
+    }
+
+    fn notify_recovery_completed(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()> {
+        info!("SMS: Recovery completed {} for guardian {}", request.id, guardian.id);
+        Ok(())
+    }
+}
+
+impl GuardianNotifier {
+    pub fn new() -> Self {
+        let mut handlers: HashMap<GuardianType, Box<dyn GuardianNotificationHandler>> = HashMap::new();
+        handlers.insert(GuardianType::Email, Box::new(EmailNotificationHandler));
+        handlers.insert(GuardianType::Phone, Box::new(SmsNotificationHandler));
+        
+        Self { handlers }
+    }
+
+    pub fn notify_recovery_request(&self, guardian: &Guardian, request: &RecoveryRequest) -> Result<()> {
+        if let Some(handler) = self.handlers.get(&guardian.guardian_type) {
+            handler.notify_recovery_request(guardian, request)
+        } else {
+            warn!("No notification handler for guardian type {:?}", guardian.guardian_type);
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::OsRng;
+
+    #[tokio::test]
+    async fn test_recovery_manager_guardian_management() {
+        let mut manager = RecoveryManager::new();
+        let user_id = Uuid::new_v4();
+
+        // Add guardian
+        let guardian_id = manager.add_guardian(
+            user_id,
+            GuardianType::Email,
+            "guardian@example.com".to_string(),
+            None,
+        ).unwrap();
+
+        // Check guardian was added
+        let guardians = manager.get_user_guardians(user_id);
+        assert_eq!(guardians.len(), 1);
+        assert_eq!(guardians[0].id, guardian_id);
+
+        // Remove guardian
+        manager.remove_guardian(user_id, guardian_id).unwrap();
+        
+        // Check guardian was deactivated
+        let guardians = manager.get_user_guardians(user_id);
+        assert_eq!(guardians.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_recovery_initiation() {
+        let mut manager = RecoveryManager::new();
+        let user_id = Uuid::new_v4();
+
+        // Add enough guardians
+        for i in 0..3 {
+            manager.add_guardian(
+                user_id,
+                GuardianType::Email,
+                format!("guardian{}@example.com", i),
+                None,
+            ).unwrap();
+        }
+
+        // Initiate recovery
+        let policy = RecoveryPolicy::default();
+        let request = manager.initiate_recovery(user_id, policy).unwrap();
+
+        assert_eq!(request.user_id, user_id);
+        assert_eq!(request.status, RecoveryStatus::Pending);
+        assert_eq!(request.threshold, 2);
+    }
+
+    #[tokio::test]
+    async fn test_recovery_shares_setup() {
+        let mut rng = OsRng;
+        let mut manager = RecoveryManager::new();
+        let user_id = Uuid::new_v4();
+
+        // Add guardians
+        for i in 0..3 {
+            manager.add_guardian(
+                user_id,
+                GuardianType::Email,
+                format!("guardian{}@example.com", i),
+                None,
+            ).unwrap();
+        }
+
+        // Setup recovery shares
+        let secret = b"super secret recovery data";
+        manager.setup_recovery_shares(user_id, secret, 2, &mut rng).unwrap();
+
+        // Check shares were created
+        assert!(!manager.recovery_shares.is_empty());
+    }
+}

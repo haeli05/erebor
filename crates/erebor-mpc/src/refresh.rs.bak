@@ -1,0 +1,623 @@
+//! Key refresh functionality for CGGMP21 MPC
+//!
+//! This module implements key refresh (re-sharing) that allows updating
+//! private key shares without changing the public key, enabling proactive security.
+
+use crate::types::*;
+use crate::errors::{MpcError, Result};
+
+use k256::{ecdsa::VerifyingKey, ProjectivePoint, Scalar};
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+use tracing::{info, debug, warn};
+use chrono::Utc;
+
+/// Key refresh session configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshConfig {
+    pub session_id: SessionId,
+    pub old_parties: Vec<PartyId>,
+    pub new_parties: Vec<PartyId>,
+    pub threshold: Threshold,
+    pub timeout_ms: u64,
+}
+
+/// Refresh participant state
+#[derive(Debug)]
+pub struct RefreshParticipant {
+    pub party_id: PartyId,
+    pub session_id: SessionId,
+    pub threshold: Threshold,
+    pub old_parties: Vec<PartyId>,
+    pub new_parties: Vec<PartyId>,
+    
+    // Current key material (if old party)
+    pub current_private_share: Option<PrivateKeyShare>,
+    pub current_public_shares: HashMap<PartyId, PublicKeyShare>,
+    pub group_public_key: VerifyingKey,
+    
+    // Refresh shares and commitments
+    pub refresh_shares: HashMap<PartyId, RefreshShare>,
+    pub refresh_commitments: HashMap<PartyId, RefreshCommitment>,
+    
+    // New key material after refresh
+    pub new_private_share: Option<PrivateKeyShare>,
+    pub new_public_shares: HashMap<PartyId, PublicKeyShare>,
+}
+
+/// Refresh share for re-distributing key material
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct RefreshShare {
+    pub from_party: PartyId,
+    pub to_party: PartyId,
+    pub session_id: SessionId,
+    pub encrypted_share: Vec<u8>,
+    pub zero_share: Scalar, // Additional randomness
+    pub proof: RefreshProof,
+}
+
+/// VSS commitment for refresh shares
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshCommitment {
+    pub party_id: PartyId,
+    pub session_id: SessionId,
+    pub commitments: Vec<ProjectivePoint>,
+    pub zero_commitments: Vec<ProjectivePoint>, // For added randomness
+}
+
+/// Zero-knowledge proof for refresh correctness
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RefreshProof {
+    pub commitment: ProjectivePoint,
+    pub challenge: Scalar,
+    pub response: Scalar,
+}
+
+/// Result of key refresh operation
+#[derive(Debug, Clone)]
+pub struct RefreshResult {
+    pub session_id: SessionId,
+    pub new_private_share: PrivateKeyShare,
+    pub new_public_shares: HashMap<PartyId, PublicKeyShare>,
+    pub group_public_key: VerifyingKey, // Should remain the same
+}
+
+impl RefreshParticipant {
+    /// Create a new refresh participant (for existing party)
+    pub fn new_existing_party(
+        party_id: PartyId,
+        session_id: SessionId,
+        threshold: Threshold,
+        old_parties: Vec<PartyId>,
+        new_parties: Vec<PartyId>,
+        current_private_share: PrivateKeyShare,
+        current_public_shares: HashMap<PartyId, PublicKeyShare>,
+        group_public_key: VerifyingKey,
+    ) -> Result<Self> {
+        if threshold == 0 || threshold as usize > new_parties.len() {
+            return Err(MpcError::InvalidThreshold {
+                actual: threshold,
+                max: new_parties.len() as u32,
+            }.into());
+        }
+
+        if !old_parties.contains(&party_id) {
+            return Err(MpcError::PartyNotFound { party_id }.into());
+        }
+
+        Ok(Self {
+            party_id,
+            session_id,
+            threshold,
+            old_parties,
+            new_parties,
+            current_private_share: Some(current_private_share),
+            current_public_shares,
+            group_public_key,
+            refresh_shares: HashMap::new(),
+            refresh_commitments: HashMap::new(),
+            new_private_share: None,
+            new_public_shares: HashMap::new(),
+        })
+    }
+
+    /// Create a new refresh participant (for new party joining)
+    pub fn new_joining_party(
+        party_id: PartyId,
+        session_id: SessionId,
+        threshold: Threshold,
+        old_parties: Vec<PartyId>,
+        new_parties: Vec<PartyId>,
+        group_public_key: VerifyingKey,
+    ) -> Result<Self> {
+        if threshold == 0 || threshold as usize > new_parties.len() {
+            return Err(MpcError::InvalidThreshold {
+                actual: threshold,
+                max: new_parties.len() as u32,
+            }.into());
+        }
+
+        if !new_parties.contains(&party_id) {
+            return Err(MpcError::PartyNotFound { party_id }.into());
+        }
+
+        Ok(Self {
+            party_id,
+            session_id,
+            threshold,
+            old_parties,
+            new_parties,
+            current_private_share: None,
+            current_public_shares: HashMap::new(),
+            group_public_key,
+            refresh_shares: HashMap::new(),
+            refresh_commitments: HashMap::new(),
+            new_private_share: None,
+            new_public_shares: HashMap::new(),
+        })
+    }
+
+    /// Generate refresh shares (only for existing parties)
+    pub fn generate_refresh_shares<R: CryptoRng + RngCore>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<(RefreshCommitment, Vec<RefreshShare>)> {
+        let current_share = self.current_private_share.as_ref()
+            .ok_or(MpcError::CryptographicError("No current private share".to_string()))?;
+
+        // Generate random polynomial coefficients for re-sharing
+        let mut coefficients = Vec::with_capacity(self.threshold as usize);
+        coefficients.push(current_share.share); // a0 = current share
+        
+        for _ in 1..self.threshold {
+            coefficients.push(Scalar::random(rng));
+        }
+
+        // Generate zero-polynomial for added randomness
+        let mut zero_coefficients = Vec::with_capacity(self.threshold as usize);
+        for _ in 0..self.threshold {
+            zero_coefficients.push(Scalar::random(rng));
+        }
+
+        // Compute commitments
+        let mut commitments = Vec::with_capacity(self.threshold as usize);
+        for coeff in &coefficients {
+            commitments.push(ProjectivePoint::GENERATOR * coeff);
+        }
+
+        let mut zero_commitments = Vec::with_capacity(self.threshold as usize);
+        for coeff in &zero_coefficients {
+            zero_commitments.push(ProjectivePoint::GENERATOR * coeff);
+        }
+
+        let refresh_commitment = RefreshCommitment {
+            party_id: self.party_id,
+            session_id: self.session_id,
+            commitments: commitments.clone(),
+            zero_commitments: zero_commitments.clone(),
+        };
+
+        // Store our commitments
+        self.refresh_commitments.insert(self.party_id, refresh_commitment.clone());
+
+        // Generate shares for new parties
+        let mut refresh_shares = Vec::new();
+        for &new_party_id in &self.new_parties {
+            // Evaluate polynomial at new_party_id
+            let x = Scalar::from(new_party_id);
+            let mut y = coefficients[0]; // a0
+            let mut zero_y = zero_coefficients[0];
+            let mut x_power = x; // x^1
+            
+            for i in 1..coefficients.len() {
+                y += coefficients[i] * x_power;
+                zero_y += zero_coefficients[i] * x_power;
+                x_power *= x;
+            }
+
+            // Generate proof of correctness
+            let proof = self.generate_refresh_proof(&y, &zero_y, rng)?;
+
+            // For simplicity, we'll use the share directly (in practice, encrypt with recipient's key)
+            let mut share_bytes = y.to_bytes().to_vec();
+            share_bytes.extend_from_slice(&zero_y.to_bytes());
+
+            let refresh_share = RefreshShare {
+                from_party: self.party_id,
+                to_party: new_party_id,
+                session_id: self.session_id,
+                encrypted_share: share_bytes,
+                zero_share: zero_y,
+                proof,
+            };
+
+            refresh_shares.push(refresh_share);
+        }
+
+        info!("Generated refresh shares for {} new parties", refresh_shares.len());
+        Ok((refresh_commitment, refresh_shares))
+    }
+
+    /// Process refresh commitment from an old party
+    pub fn process_refresh_commitment(&mut self, commitment: RefreshCommitment) -> Result<()> {
+        if commitment.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: commitment.session_id }.into());
+        }
+
+        if !self.old_parties.contains(&commitment.party_id) {
+            return Err(MpcError::PartyNotFound { party_id: commitment.party_id }.into());
+        }
+
+        if commitment.commitments.len() != self.threshold as usize {
+            return Err(MpcError::InvalidPartyConfiguration.into());
+        }
+
+        self.refresh_commitments.insert(commitment.party_id, commitment);
+        debug!("Processed refresh commitment from party {}", commitment.party_id);
+        Ok(())
+    }
+
+    /// Process refresh share from an old party
+    pub fn process_refresh_share(&mut self, share: RefreshShare) -> Result<()> {
+        if share.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: share.session_id }.into());
+        }
+
+        if share.to_party != self.party_id {
+            return Err(MpcError::PartyNotFound { party_id: share.to_party }.into());
+        }
+
+        if !self.old_parties.contains(&share.from_party) {
+            return Err(MpcError::PartyNotFound { party_id: share.from_party }.into());
+        }
+
+        // Verify the proof
+        if !self.verify_refresh_proof(&share)? {
+            return Err(MpcError::CryptographicError("Invalid refresh proof".to_string()).into());
+        }
+
+        // Decrypt/extract the share
+        if share.encrypted_share.len() != 64 {
+            return Err(MpcError::CryptographicError("Invalid share length".to_string()).into());
+        }
+
+        let share_bytes: [u8; 32] = share.encrypted_share[0..32].try_into()
+            .map_err(|_| MpcError::CryptographicError("Invalid share format".to_string()))?;
+
+        let scalar_share = Scalar::from_bytes(&share_bytes.into())
+            .into_option()
+            .ok_or(MpcError::CryptographicError("Invalid scalar share".to_string()))?;
+
+        // Verify share against commitment
+        let commitment = self.refresh_commitments.get(&share.from_party)
+            .ok_or(MpcError::PartyNotFound { party_id: share.from_party })?;
+
+        if !self.verify_refresh_share_commitment(self.party_id, scalar_share, &commitment.commitments)? {
+            return Err(MpcError::CryptographicError("Share commitment verification failed".to_string()).into());
+        }
+
+        self.refresh_shares.insert(share.from_party, share);
+        debug!("Processed refresh share from party {}", share.from_party);
+        Ok(())
+    }
+
+    /// Finalize key refresh and compute new private share
+    pub fn finalize_refresh(&mut self) -> Result<RefreshResult> {
+        // Check we have shares from all old parties
+        if self.refresh_shares.len() != self.old_parties.len() {
+            return Err(MpcError::InsufficientParties {
+                actual: self.refresh_shares.len(),
+                required: self.old_parties.len(),
+            }.into());
+        }
+
+        // Compute new private share by summing all received shares
+        let mut new_private_share_scalar = Scalar::ZERO;
+        for (_, refresh_share) in &self.refresh_shares {
+            let share_bytes: [u8; 32] = refresh_share.encrypted_share[0..32].try_into()
+                .map_err(|_| MpcError::CryptographicError("Invalid share format".to_string()))?;
+
+            let scalar_share = Scalar::from_bytes(&share_bytes.into())
+                .into_option()
+                .ok_or(MpcError::CryptographicError("Invalid scalar share".to_string()))?;
+
+            new_private_share_scalar += scalar_share;
+        }
+
+        // Create new private share
+        let new_private_share = PrivateKeyShare {
+            party_id: self.party_id,
+            share: new_private_share_scalar,
+            nonce_shares: HashMap::new(),
+        };
+
+        // Generate new public shares for all new parties
+        let mut new_public_shares = HashMap::new();
+        for &new_party_id in &self.new_parties {
+            // Compute public key for this party by combining commitments
+            let mut public_key_point = ProjectivePoint::IDENTITY;
+            
+            for (_, commitment) in &self.refresh_commitments {
+                // Evaluate commitment polynomial at new_party_id
+                let x = Scalar::from(new_party_id);
+                let mut commitment_point = commitment.commitments[0]; // C_0
+                let mut x_power = x; // x^1
+
+                for i in 1..commitment.commitments.len() {
+                    commitment_point += commitment.commitments[i] * x_power;
+                    x_power *= x;
+                }
+
+                public_key_point += commitment_point;
+            }
+
+            let public_key = k256::ecdsa::VerifyingKey::from_affine(
+                k256::AffinePoint::from(public_key_point)
+            ).map_err(|e| MpcError::CryptographicError(format!("Invalid public key for party {}: {}", new_party_id, e)))?;
+
+            new_public_shares.insert(new_party_id, PublicKeyShare {
+                party_id: new_party_id,
+                public_key,
+                commitment: self.refresh_commitments.values().map(|c| c.commitments.clone()).flatten().collect(),
+            });
+        }
+
+        self.new_private_share = Some(new_private_share.clone());
+        self.new_public_shares = new_public_shares.clone();
+
+        info!("Key refresh finalized successfully for party {}", self.party_id);
+
+        Ok(RefreshResult {
+            session_id: self.session_id,
+            new_private_share,
+            new_public_shares,
+            group_public_key: self.group_public_key,
+        })
+    }
+
+    /// Generate proof for refresh share correctness
+    fn generate_refresh_proof<R: CryptoRng + RngCore>(
+        &self,
+        share: &Scalar,
+        zero_share: &Scalar,
+        rng: &mut R,
+    ) -> Result<RefreshProof> {
+        // Simple Schnorr proof that we know the discrete log
+        let r = Scalar::random(rng);
+        let commitment = ProjectivePoint::GENERATOR * r;
+
+        // Create challenge using Fiat-Shamir
+        let combined_share = share + zero_share;
+        let public_point = ProjectivePoint::GENERATOR * combined_share;
+        let challenge = self.hash_to_scalar(&[
+            commitment.to_affine().to_encoded_point(true).as_bytes(),
+            public_point.to_affine().to_encoded_point(true).as_bytes(),
+        ])?;
+
+        let response = r + challenge * combined_share;
+
+        Ok(RefreshProof {
+            commitment,
+            challenge,
+            response,
+        })
+    }
+
+    /// Verify refresh proof
+    fn verify_refresh_proof(&self, share: &RefreshShare) -> Result<bool> {
+        // Extract combined share
+        if share.encrypted_share.len() != 64 {
+            return Ok(false);
+        }
+
+        let share_bytes: [u8; 32] = share.encrypted_share[0..32].try_into()
+            .map_err(|_| MpcError::CryptographicError("Invalid share format".to_string()))?;
+
+        let scalar_share = Scalar::from_bytes(&share_bytes.into())
+            .into_option()
+            .ok_or(MpcError::CryptographicError("Invalid scalar share".to_string()))?;
+
+        let combined_share = scalar_share + share.zero_share;
+
+        // Recompute public point
+        let public_point = ProjectivePoint::GENERATOR * share.proof.response - share.proof.commitment * share.proof.challenge;
+
+        // Recompute expected challenge
+        let expected_public_point = ProjectivePoint::GENERATOR * combined_share;
+        let expected_challenge = self.hash_to_scalar(&[
+            share.proof.commitment.to_affine().to_encoded_point(true).as_bytes(),
+            expected_public_point.to_affine().to_encoded_point(true).as_bytes(),
+        ])?;
+
+        Ok(share.proof.challenge == expected_challenge && public_point == expected_public_point)
+    }
+
+    /// Verify share against VSS commitment
+    fn verify_refresh_share_commitment(
+        &self,
+        party_id: PartyId,
+        share: Scalar,
+        commitments: &[ProjectivePoint],
+    ) -> Result<bool> {
+        let share_commitment = ProjectivePoint::GENERATOR * share;
+
+        // Compute expected commitment using polynomial evaluation
+        let x = Scalar::from(party_id);
+        let mut expected = commitments[0]; // C_0
+        let mut x_power = x; // x^1
+
+        for i in 1..commitments.len() {
+            expected += commitments[i] * x_power;
+            x_power *= x;
+        }
+
+        Ok(share_commitment == expected)
+    }
+
+    /// Hash data to scalar for Fiat-Shamir
+    fn hash_to_scalar(&self, data: &[&[u8]]) -> Result<Scalar> {
+        use sha2::{Sha256, Digest};
+        
+        let mut hasher = Sha256::new();
+        for d in data {
+            hasher.update(d);
+        }
+        let hash = hasher.finalize();
+
+        Ok(Scalar::from_bytes_reduced(&hash.into()))
+    }
+}
+
+/// Coordinator for managing a key refresh session
+pub struct RefreshCoordinator {
+    pub session_id: SessionId,
+    pub threshold: Threshold,
+    pub old_parties: Vec<PartyId>,
+    pub new_parties: Vec<PartyId>,
+    pub commitments: HashMap<PartyId, RefreshCommitment>,
+    pub shares: HashMap<(PartyId, PartyId), RefreshShare>, // (from, to) -> share
+    pub phase: RefreshPhase,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RefreshPhase {
+    Init,
+    CommitmentPhase,
+    ShareDistribution,
+    Finalization,
+    Complete,
+}
+
+impl RefreshCoordinator {
+    /// Create a new refresh coordinator
+    pub fn new(
+        session_id: SessionId,
+        threshold: Threshold,
+        old_parties: Vec<PartyId>,
+        new_parties: Vec<PartyId>,
+    ) -> Self {
+        Self {
+            session_id,
+            threshold,
+            old_parties,
+            new_parties,
+            commitments: HashMap::new(),
+            shares: HashMap::new(),
+            phase: RefreshPhase::Init,
+        }
+    }
+
+    /// Add refresh commitment
+    pub fn add_commitment(&mut self, commitment: RefreshCommitment) -> Result<()> {
+        if commitment.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: commitment.session_id }.into());
+        }
+
+        self.commitments.insert(commitment.party_id, commitment);
+
+        if self.commitments.len() == self.old_parties.len() {
+            self.phase = RefreshPhase::CommitmentPhase;
+        }
+
+        Ok(())
+    }
+
+    /// Add refresh share
+    pub fn add_share(&mut self, share: RefreshShare) -> Result<()> {
+        if share.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: share.session_id }.into());
+        }
+
+        self.shares.insert((share.from_party, share.to_party), share);
+
+        let expected_shares = self.old_parties.len() * self.new_parties.len();
+        if self.shares.len() == expected_shares {
+            self.phase = RefreshPhase::ShareDistribution;
+        }
+
+        Ok(())
+    }
+
+    /// Check if refresh is ready for finalization
+    pub fn is_ready_for_finalization(&self) -> bool {
+        self.phase == RefreshPhase::ShareDistribution &&
+        self.commitments.len() == self.old_parties.len() &&
+        self.shares.len() == self.old_parties.len() * self.new_parties.len()
+    }
+
+    /// Get current phase
+    pub fn get_phase(&self) -> &RefreshPhase {
+        &self.phase
+    }
+
+    /// Mark as complete
+    pub fn mark_complete(&mut self) {
+        self.phase = RefreshPhase::Complete;
+    }
+
+    /// Get shares for a specific new party
+    pub fn get_shares_for_party(&self, party_id: PartyId) -> Vec<&RefreshShare> {
+        self.shares.values()
+            .filter(|share| share.to_party == party_id)
+            .collect()
+    }
+
+    /// Get all commitments
+    pub fn get_commitments(&self) -> Vec<&RefreshCommitment> {
+        self.commitments.values().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::rngs::OsRng;
+    use k256::ecdsa::SigningKey;
+
+    #[tokio::test]
+    async fn test_refresh_coordinator_phases() {
+        let session_id = Uuid::new_v4();
+        let threshold = 2;
+        let old_parties = vec![1, 2, 3];
+        let new_parties = vec![2, 3, 4];
+
+        let coordinator = RefreshCoordinator::new(session_id, threshold, old_parties, new_parties);
+        assert_eq!(*coordinator.get_phase(), RefreshPhase::Init);
+        assert!(!coordinator.is_ready_for_finalization());
+    }
+
+    #[tokio::test]
+    async fn test_refresh_participant_creation() {
+        let mut rng = OsRng;
+        let session_id = Uuid::new_v4();
+        let threshold = 2;
+        let old_parties = vec![1, 2, 3];
+        let new_parties = vec![2, 3, 4];
+
+        // Create mock private share
+        let signing_key = SigningKey::random(&mut rng);
+        let private_share = PrivateKeyShare {
+            party_id: 1,
+            share: *signing_key.as_nonzero_scalar(),
+            nonce_shares: HashMap::new(),
+        };
+
+        let group_public_key = signing_key.verifying_key();
+
+        let participant = RefreshParticipant::new_existing_party(
+            1,
+            session_id,
+            threshold,
+            old_parties,
+            new_parties,
+            private_share,
+            HashMap::new(),
+            *group_public_key,
+        );
+
+        assert!(participant.is_ok());
+    }
+}

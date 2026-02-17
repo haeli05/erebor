@@ -1,0 +1,512 @@
+//! Threshold signature generation using CGGMP21 protocol
+//!
+//! This module implements the signing phase of the CGGMP21 protocol,
+//! allowing t-of-n parties to collaboratively produce ECDSA signatures.
+
+use crate::types::*;
+use crate::errors::{MpcError, Result};
+
+use k256::{
+    ecdsa::{Signature, VerifyingKey},
+    ProjectivePoint, Scalar, AffinePoint,
+};
+use rand::{CryptoRng, RngCore};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
+use zeroize::{Zeroize, ZeroizeOnDrop};
+use tracing::{info, debug, warn};
+use chrono::Utc;
+
+/// Signing participant state
+#[derive(Debug)]
+pub struct SigningParticipant {
+    pub party_id: PartyId,
+    pub session_id: SessionId,
+    pub message_hash: [u8; 32],
+    pub threshold: Threshold,
+    pub signers: Vec<PartyId>,
+    
+    // Key material from DKG
+    pub private_share: PrivateKeyShare,
+    pub public_shares: HashMap<PartyId, PublicKeyShare>,
+    pub group_public_key: VerifyingKey,
+    
+    // Nonce generation state
+    pub nonce_shares: HashMap<PartyId, Scalar>,
+    pub nonce_commitments: HashMap<PartyId, ProjectivePoint>,
+    
+    // Signature shares
+    pub signature_shares: HashMap<PartyId, SignatureShare>,
+    
+    // Final signature
+    pub final_signature: Option<ThresholdSignature>,
+}
+
+/// Individual signature share from a party
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignatureShare {
+    pub party_id: PartyId,
+    pub session_id: SessionId,
+    pub share: Scalar,
+    pub nonce_commitment: ProjectivePoint,
+}
+
+/// Nonce commitment for signature generation
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NonceCommitment {
+    pub party_id: PartyId,
+    pub session_id: SessionId,
+    pub commitment: ProjectivePoint,
+}
+
+/// Nonce share (revealed after commitments)
+#[derive(Debug, Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct NonceShare {
+    pub party_id: PartyId,
+    pub session_id: SessionId,
+    pub nonce: Scalar,
+}
+
+impl SigningParticipant {
+    /// Create a new signing participant
+    pub fn new(
+        party_id: PartyId,
+        session_id: SessionId,
+        message_hash: [u8; 32],
+        threshold: Threshold,
+        signers: Vec<PartyId>,
+        private_share: PrivateKeyShare,
+        public_shares: HashMap<PartyId, PublicKeyShare>,
+        group_public_key: VerifyingKey,
+    ) -> Result<Self> {
+        if signers.len() < threshold as usize {
+            return Err(MpcError::InsufficientParties {
+                actual: signers.len(),
+                required: threshold as usize,
+            }.into());
+        }
+
+        if !signers.contains(&party_id) {
+            return Err(MpcError::PartyNotFound { party_id }.into());
+        }
+
+        Ok(Self {
+            party_id,
+            session_id,
+            message_hash,
+            threshold,
+            signers,
+            private_share,
+            public_shares,
+            group_public_key,
+            nonce_shares: HashMap::new(),
+            nonce_commitments: HashMap::new(),
+            signature_shares: HashMap::new(),
+            final_signature: None,
+        })
+    }
+
+    /// Generate and commit to a nonce for signature generation
+    pub fn generate_nonce_commitment<R: CryptoRng + RngCore>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<NonceCommitment> {
+        // Generate random nonce
+        let nonce = Scalar::random(rng);
+        let commitment = ProjectivePoint::GENERATOR * nonce;
+
+        // Store nonce for later use
+        let existing_nonces = self.private_share.nonce_shares.get_mut(&self.session_id);
+        if let Some(nonces) = existing_nonces {
+            *nonces = nonce;
+        } else {
+            self.private_share.nonce_shares.insert(self.session_id, nonce);
+        }
+
+        self.nonce_commitments.insert(self.party_id, commitment);
+
+        debug!("Generated nonce commitment for party {} in session {}", self.party_id, self.session_id);
+
+        Ok(NonceCommitment {
+            party_id: self.party_id,
+            session_id: self.session_id,
+            commitment,
+        })
+    }
+
+    /// Process nonce commitment from another party
+    pub fn process_nonce_commitment(&mut self, commitment: NonceCommitment) -> Result<()> {
+        if commitment.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: commitment.session_id }.into());
+        }
+
+        if !self.signers.contains(&commitment.party_id) {
+            return Err(MpcError::PartyNotFound { party_id: commitment.party_id }.into());
+        }
+
+        self.nonce_commitments.insert(commitment.party_id, commitment.commitment);
+        debug!("Processed nonce commitment from party {}", commitment.party_id);
+        Ok(())
+    }
+
+    /// Reveal nonce after all commitments are received
+    pub fn reveal_nonce(&mut self) -> Result<NonceShare> {
+        // Verify we have all nonce commitments
+        if self.nonce_commitments.len() != self.signers.len() {
+            return Err(MpcError::InsufficientParties {
+                actual: self.nonce_commitments.len(),
+                required: self.signers.len(),
+            }.into());
+        }
+
+        let nonce = self.private_share.nonce_shares.get(&self.session_id)
+            .ok_or(MpcError::CryptographicError("Missing nonce for session".to_string()))?;
+
+        debug!("Revealing nonce for party {} in session {}", self.party_id, self.session_id);
+
+        Ok(NonceShare {
+            party_id: self.party_id,
+            session_id: self.session_id,
+            nonce: *nonce,
+        })
+    }
+
+    /// Process revealed nonce from another party
+    pub fn process_nonce_share(&mut self, nonce_share: NonceShare) -> Result<()> {
+        if nonce_share.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: nonce_share.session_id }.into());
+        }
+
+        if !self.signers.contains(&nonce_share.party_id) {
+            return Err(MpcError::PartyNotFound { party_id: nonce_share.party_id }.into());
+        }
+
+        // Verify nonce against commitment
+        let expected_commitment = ProjectivePoint::GENERATOR * nonce_share.nonce;
+        let actual_commitment = self.nonce_commitments.get(&nonce_share.party_id)
+            .ok_or(MpcError::CryptographicError("Missing nonce commitment".to_string()))?;
+
+        if expected_commitment != *actual_commitment {
+            return Err(MpcError::CryptographicError("Nonce commitment verification failed".to_string()).into());
+        }
+
+        self.nonce_shares.insert(nonce_share.party_id, nonce_share.nonce);
+        debug!("Processed nonce share from party {}", nonce_share.party_id);
+        Ok(())
+    }
+
+    /// Generate partial signature
+    pub fn generate_signature_share(&mut self) -> Result<SignatureShare> {
+        // Verify we have all nonce shares
+        if self.nonce_shares.len() != self.signers.len() {
+            return Err(MpcError::InsufficientParties {
+                actual: self.nonce_shares.len(),
+                required: self.signers.len(),
+            }.into());
+        }
+
+        // Compute combined nonce point R = sum of all nonce commitments
+        let mut combined_nonce_point = ProjectivePoint::IDENTITY;
+        for &party_id in &self.signers {
+            let commitment = self.nonce_commitments.get(&party_id)
+                .ok_or(MpcError::CryptographicError("Missing nonce commitment".to_string()))?;
+            combined_nonce_point += commitment;
+        }
+
+        let combined_nonce_affine = AffinePoint::from(combined_nonce_point);
+        let r_coordinate = combined_nonce_affine.x();
+
+        // Convert to scalar
+        let r_scalar = Scalar::from_bytes_reduced(r_coordinate.to_bytes());
+
+        // Parse message hash as scalar
+        let message_scalar = Scalar::from_bytes_reduced(&self.message_hash.into());
+
+        // Compute Lagrange coefficient for this party
+        let lagrange_coeff = self.compute_lagrange_coefficient(self.party_id)?;
+
+        // Get our nonce
+        let our_nonce = self.nonce_shares.get(&self.party_id)
+            .ok_or(MpcError::CryptographicError("Missing our nonce".to_string()))?;
+
+        // Compute signature share: s_i = k_i + r * lambda_i * x_i * m
+        let signature_share = our_nonce + r_scalar * lagrange_coeff * self.private_share.share * message_scalar;
+
+        let share = SignatureShare {
+            party_id: self.party_id,
+            session_id: self.session_id,
+            share: signature_share,
+            nonce_commitment: self.nonce_commitments.get(&self.party_id).unwrap().clone(),
+        };
+
+        self.signature_shares.insert(self.party_id, share.clone());
+        info!("Generated signature share for party {}", self.party_id);
+
+        Ok(share)
+    }
+
+    /// Process signature share from another party
+    pub fn process_signature_share(&mut self, signature_share: SignatureShare) -> Result<()> {
+        if signature_share.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: signature_share.session_id }.into());
+        }
+
+        if !self.signers.contains(&signature_share.party_id) {
+            return Err(MpcError::PartyNotFound { party_id: signature_share.party_id }.into());
+        }
+
+        // TODO: Add signature share verification using ZK proofs
+
+        self.signature_shares.insert(signature_share.party_id, signature_share);
+        debug!("Processed signature share from party {}", signature_share.party_id);
+        Ok(())
+    }
+
+    /// Combine signature shares into final signature
+    pub fn finalize_signature(&mut self) -> Result<ThresholdSignature> {
+        // Verify we have enough signature shares
+        if self.signature_shares.len() < self.threshold as usize {
+            return Err(MpcError::InsufficientParties {
+                actual: self.signature_shares.len(),
+                required: self.threshold as usize,
+            }.into());
+        }
+
+        // Compute combined nonce point R
+        let mut combined_nonce_point = ProjectivePoint::IDENTITY;
+        for &party_id in &self.signers {
+            let commitment = self.nonce_commitments.get(&party_id)
+                .ok_or(MpcError::CryptographicError("Missing nonce commitment".to_string()))?;
+            combined_nonce_point += commitment;
+        }
+
+        let combined_nonce_affine = AffinePoint::from(combined_nonce_point);
+        let r_bytes = combined_nonce_affine.x().to_bytes();
+
+        // Combine signature shares
+        let mut combined_s = Scalar::ZERO;
+        for (_, signature_share) in &self.signature_shares {
+            combined_s += signature_share.share;
+        }
+
+        let s_bytes = combined_s.to_bytes();
+
+        // Create ECDSA signature
+        let signature = Signature::from_scalars(r_bytes, s_bytes)
+            .map_err(|e| MpcError::CryptographicError(format!("Invalid signature: {}", e)))?;
+
+        // Verify signature
+        self.group_public_key.verify(&self.message_hash, &signature)
+            .map_err(|e| MpcError::SigningFailed(format!("Signature verification failed: {}", e)))?;
+
+        let threshold_signature = ThresholdSignature {
+            signature,
+            signers: self.signers.clone(),
+            session_id: self.session_id,
+            timestamp: Utc::now(),
+        };
+
+        self.final_signature = Some(threshold_signature.clone());
+        info!("Successfully created threshold signature with {} signers", self.signers.len());
+
+        Ok(threshold_signature)
+    }
+
+    /// Compute Lagrange interpolation coefficient for a party
+    fn compute_lagrange_coefficient(&self, party_id: PartyId) -> Result<Scalar> {
+        let mut numerator = Scalar::ONE;
+        let mut denominator = Scalar::ONE;
+
+        for &other_party_id in &self.signers {
+            if other_party_id != party_id {
+                let other = Scalar::from(other_party_id);
+                let current = Scalar::from(party_id);
+
+                numerator *= other;
+                denominator *= other - current;
+            }
+        }
+
+        let inv_denominator = denominator.invert()
+            .ok_or(MpcError::CryptographicError("Cannot compute Lagrange coefficient".to_string()))?;
+
+        Ok(numerator * inv_denominator)
+    }
+}
+
+/// Coordinator for managing a signing session
+pub struct SigningCoordinator {
+    pub session_id: SessionId,
+    pub message_hash: [u8; 32],
+    pub threshold: Threshold,
+    pub signers: Vec<PartyId>,
+    pub nonce_commitments: HashMap<PartyId, NonceCommitment>,
+    pub nonce_shares: HashMap<PartyId, NonceShare>,
+    pub signature_shares: HashMap<PartyId, SignatureShare>,
+    pub phase: SigningPhase,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SigningPhase {
+    Init,
+    NonceCommitment,
+    NonceReveal,
+    SignatureGeneration,
+    Finalization,
+    Complete,
+}
+
+impl SigningCoordinator {
+    /// Create a new signing coordinator
+    pub fn new(
+        session_id: SessionId,
+        message_hash: [u8; 32],
+        threshold: Threshold,
+        signers: Vec<PartyId>,
+    ) -> Self {
+        Self {
+            session_id,
+            message_hash,
+            threshold,
+            signers,
+            nonce_commitments: HashMap::new(),
+            nonce_shares: HashMap::new(),
+            signature_shares: HashMap::new(),
+            phase: SigningPhase::Init,
+        }
+    }
+
+    /// Add nonce commitment
+    pub fn add_nonce_commitment(&mut self, commitment: NonceCommitment) -> Result<()> {
+        if commitment.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: commitment.session_id }.into());
+        }
+
+        self.nonce_commitments.insert(commitment.party_id, commitment);
+
+        if self.nonce_commitments.len() == self.signers.len() && self.phase == SigningPhase::Init {
+            self.phase = SigningPhase::NonceCommitment;
+        }
+
+        Ok(())
+    }
+
+    /// Add nonce share
+    pub fn add_nonce_share(&mut self, nonce_share: NonceShare) -> Result<()> {
+        if nonce_share.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: nonce_share.session_id }.into());
+        }
+
+        self.nonce_shares.insert(nonce_share.party_id, nonce_share);
+
+        if self.nonce_shares.len() == self.signers.len() && self.phase == SigningPhase::NonceCommitment {
+            self.phase = SigningPhase::NonceReveal;
+        }
+
+        Ok(())
+    }
+
+    /// Add signature share
+    pub fn add_signature_share(&mut self, signature_share: SignatureShare) -> Result<()> {
+        if signature_share.session_id != self.session_id {
+            return Err(MpcError::SessionNotFound { session_id: signature_share.session_id }.into());
+        }
+
+        self.signature_shares.insert(signature_share.party_id, signature_share);
+
+        if self.signature_shares.len() >= self.threshold as usize {
+            if self.phase == SigningPhase::NonceReveal {
+                self.phase = SigningPhase::SignatureGeneration;
+            } else if self.phase == SigningPhase::SignatureGeneration {
+                self.phase = SigningPhase::Finalization;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if we can proceed to next phase
+    pub fn can_proceed(&self) -> bool {
+        match self.phase {
+            SigningPhase::Init => self.nonce_commitments.len() == self.signers.len(),
+            SigningPhase::NonceCommitment => self.nonce_shares.len() == self.signers.len(),
+            SigningPhase::NonceReveal => self.signature_shares.len() >= self.threshold as usize,
+            SigningPhase::SignatureGeneration => self.signature_shares.len() >= self.threshold as usize,
+            SigningPhase::Finalization => true,
+            SigningPhase::Complete => false,
+        }
+    }
+
+    /// Get current phase
+    pub fn get_phase(&self) -> &SigningPhase {
+        &self.phase
+    }
+
+    /// Mark as complete
+    pub fn mark_complete(&mut self) {
+        self.phase = SigningPhase::Complete;
+    }
+}
+
+/// Helper function to create a signing request
+pub fn create_signing_request(
+    message: &[u8],
+    signers: Vec<PartyId>,
+    threshold: Threshold,
+) -> SigningRequest {
+    use sha2::{Sha256, Digest};
+    
+    let mut hasher = Sha256::new();
+    hasher.update(message);
+    let message_hash: [u8; 32] = hasher.finalize().into();
+
+    SigningRequest {
+        session_id: Uuid::new_v4(),
+        message_hash,
+        signers,
+        threshold,
+    }
+}
+
+/// Verify a threshold signature
+pub fn verify_threshold_signature(
+    signature: &ThresholdSignature,
+    message_hash: &[u8; 32],
+    group_public_key: &VerifyingKey,
+) -> Result<bool> {
+    group_public_key.verify(message_hash, &signature.signature)
+        .map(|_| true)
+        .map_err(|e| MpcError::CryptographicError(format!("Signature verification failed: {}", e)).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dkg::DkgParticipant;
+    use rand::rngs::OsRng;
+
+    #[tokio::test]
+    async fn test_signing_coordinator_phases() {
+        let session_id = Uuid::new_v4();
+        let message_hash = [1u8; 32];
+        let threshold = 2;
+        let signers = vec![1, 2, 3];
+
+        let mut coordinator = SigningCoordinator::new(session_id, message_hash, threshold, signers);
+        assert_eq!(*coordinator.get_phase(), SigningPhase::Init);
+        assert!(!coordinator.can_proceed());
+    }
+
+    #[tokio::test]
+    async fn test_create_signing_request() {
+        let message = b"test message";
+        let signers = vec![1, 2, 3];
+        let threshold = 2;
+
+        let request = create_signing_request(message, signers.clone(), threshold);
+        assert_eq!(request.signers, signers);
+        assert_eq!(request.threshold, threshold);
+        assert_eq!(request.message_hash.len(), 32);
+    }
+}

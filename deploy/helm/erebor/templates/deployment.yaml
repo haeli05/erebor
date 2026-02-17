@@ -1,0 +1,154 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "erebor.fullname" . }}
+  labels:
+    {{- include "erebor.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.erebor.replicaCount }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "erebor.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+      labels:
+        {{- include "erebor.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "erebor.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.erebor.podSecurityContext | nindent 8 }}
+      
+      {{- if .Values.initContainers }}
+      initContainers:
+        {{- range .Values.initContainers }}
+        - name: {{ .name }}
+          image: {{ .image }}
+          command:
+            {{- range .command }}
+            - {{ . }}
+            {{- end }}
+          {{- if .env }}
+          env:
+            {{- range .env }}
+            - name: {{ .name }}
+              value: {{ tpl .value $ | quote }}
+            {{- end }}
+          {{- end }}
+        {{- end }}
+      {{- end }}
+      
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.erebor.securityContext | nindent 12 }}
+          image: "{{ .Values.erebor.image.registry }}/{{ .Values.erebor.image.repository }}:{{ .Values.erebor.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.erebor.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.erebor.service.targetPort }}
+              protocol: TCP
+            {{- if .Values.erebor.app.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.erebor.app.metrics.port }}
+              protocol: TCP
+            {{- end }}
+          
+          env:
+            # Database configuration
+            - name: POSTGRES_HOST
+              value: {{ include "erebor.postgresql.host" . | quote }}
+            - name: POSTGRES_USER
+              value: {{ .Values.postgresql.auth.username | quote }}
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "erebor.postgresql.secretName" . }}
+                  key: {{ include "erebor.postgresql.secretPasswordKey" . }}
+            - name: POSTGRES_DB
+              value: {{ .Values.postgresql.auth.database | quote }}
+            
+            # Redis configuration
+            - name: REDIS_HOST
+              value: {{ include "erebor.redis.host" . | quote }}
+            {{- if .Values.redis.auth.enabled }}
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "erebor.redis.secretName" . }}
+                  key: {{ include "erebor.redis.secretPasswordKey" . }}
+            {{- end }}
+            
+            # JWT configuration
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "erebor.secretName" . }}
+                  key: jwt-secret
+            
+            # Application environment variables
+            {{- range $key, $value := .Values.erebor.env }}
+            - name: {{ $key }}
+              value: {{ tpl (toString $value) $ | quote }}
+            {{- end }}
+          
+          {{- if .Values.erebor.livenessProbe }}
+          livenessProbe:
+            {{- toYaml .Values.erebor.livenessProbe | nindent 12 }}
+          {{- end }}
+          
+          {{- if .Values.erebor.readinessProbe }}
+          readinessProbe:
+            {{- toYaml .Values.erebor.readinessProbe | nindent 12 }}
+          {{- end }}
+          
+          {{- if .Values.erebor.startupProbe }}
+          startupProbe:
+            {{- toYaml .Values.erebor.startupProbe | nindent 12 }}
+          {{- end }}
+          
+          resources:
+            {{- toYaml .Values.erebor.resources | nindent 12 }}
+          
+          {{- if .Values.erebor.volumeMounts }}
+          volumeMounts:
+            {{- toYaml .Values.erebor.volumeMounts | nindent 12 }}
+            - name: config
+              mountPath: /etc/erebor
+              readOnly: true
+          {{- end }}
+      
+      {{- if or .Values.erebor.volumes .Values.configMap.create }}
+      volumes:
+        {{- if .Values.erebor.volumes }}
+        {{- toYaml .Values.erebor.volumes | nindent 8 }}
+        {{- end }}
+        {{- if .Values.configMap.create }}
+        - name: config
+          configMap:
+            name: {{ include "erebor.fullname" . }}
+        {{- end }}
+      {{- end }}
+      
+      {{- with .Values.erebor.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.erebor.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      
+      {{- with .Values.erebor.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

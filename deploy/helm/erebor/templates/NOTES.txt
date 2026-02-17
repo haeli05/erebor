@@ -1,0 +1,104 @@
+1. Get the application URL by running these commands:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else if contains "NodePort" .Values.erebor.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "erebor.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.erebor.service.type }}
+     NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+           You can watch the status of by running 'kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "erebor.fullname" . }}'
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "erebor.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo http://$SERVICE_IP:{{ .Values.erebor.service.port }}
+{{- else if contains "ClusterIP" .Values.erebor.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "{{ include "erebor.selectorLabels" . }}" -o jsonpath="{.items[0].metadata.name}")
+  export CONTAINER_PORT=$(kubectl get pod --namespace {{ .Release.Namespace }} $POD_NAME -o jsonpath="{.spec.containers[0].ports[0].containerPort}")
+  echo "Visit http://127.0.0.1:8080 to use your application"
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:$CONTAINER_PORT
+{{- end }}
+
+2. Check the deployment status:
+   kubectl get deployment {{ include "erebor.fullname" . }} -n {{ .Release.Namespace }}
+
+3. View application logs:
+   kubectl logs -l "{{ include "erebor.selectorLabels" . }}" -n {{ .Release.Namespace }}
+
+4. Check application health:
+   kubectl get pods -l "{{ include "erebor.selectorLabels" . }}" -n {{ .Release.Namespace }}
+
+5. API Endpoints:
+   - Health Check: GET /health
+   - API Documentation: GET /
+   - Authentication: POST /v1/auth/login
+   - TEE Status: GET /v1/tee/status  
+   - TEE Attestation: POST /v1/tee/attest
+   - HSM Status: GET /v1/hsm/status
+   - HSM Key Wrapping: POST /v1/hsm/wrap
+
+{{- if .Values.erebor.app.metrics.enabled }}
+6. Prometheus metrics available at:
+   http://{{ include "erebor.fullname" . }}:{{ .Values.erebor.app.metrics.port }}/metrics
+{{- end }}
+
+{{- if .Values.monitoring.enabled }}
+7. Monitoring:
+{{- if .Values.monitoring.serviceMonitor.enabled }}
+   - ServiceMonitor created for Prometheus scraping
+{{- end }}
+{{- if .Values.monitoring.grafanaDashboard.enabled }}
+   - Grafana dashboard available (check your Grafana instance)
+{{- end }}
+{{- end }}
+
+{{- if .Values.postgresql.enabled }}
+8. Database Connection:
+   PostgreSQL is deployed as part of this release.
+   Connection string: postgresql://{{ .Values.postgresql.auth.username }}:***@{{ include "erebor.postgresql.host" . }}:5432/{{ .Values.postgresql.auth.database }}
+{{- end }}
+
+{{- if .Values.redis.enabled }}
+9. Redis Connection:
+   Redis is deployed as part of this release.
+   Connection: {{ include "erebor.redis.host" . }}:6379
+{{- if .Values.redis.auth.enabled }}
+   Authentication is enabled.
+{{- end }}
+{{- end }}
+
+{{- if .Values.networkPolicy.enabled }}
+10. Network Policy:
+    Network policies are enabled to restrict traffic.
+    Allowed ingress: Ingress controller and same-namespace pods
+    Allowed egress: Database, Redis, DNS, and HTTPS traffic
+{{- end }}
+
+{{- if .Values.autoscaling.enabled }}
+11. Auto Scaling:
+    HPA is configured with:
+    - Min replicas: {{ .Values.autoscaling.minReplicas }}
+    - Max replicas: {{ .Values.autoscaling.maxReplicas }}
+    - CPU target: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}%
+{{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    - Memory target: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}%
+{{- end }}
+{{- end }}
+
+{{- if .Values.podDisruptionBudget.enabled }}
+12. Pod Disruption Budget:
+    PDB ensures {{ .Values.podDisruptionBudget.minAvailable }} pod(s) remain available during disruptions.
+{{- end }}
+
+Security Notes:
+- All containers run as non-root user (65534)
+- Read-only root filesystem enabled
+- All Linux capabilities dropped
+- Network policies restrict traffic flow
+- Secrets are properly managed through Kubernetes secrets
+
+For more information about Erebor, visit:
+- Documentation: https://github.com/haeli05/erebor
+- Issues: https://github.com/haeli05/erebor/issues

@@ -1,0 +1,373 @@
+# Default values for erebor
+# This is a YAML-formatted file.
+
+# Global settings
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+# Erebor application configuration
+erebor:
+  # Application settings
+  app:
+    name: erebor
+    version: 0.1.0
+    environment: production
+    logLevel: info
+    metrics:
+      enabled: true
+      port: 9090
+    
+  # Image configuration
+  image:
+    registry: ghcr.io
+    repository: haeli05/erebor
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  
+  # Replica configuration
+  replicaCount: 3
+  
+  # Port configuration
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+    annotations: {}
+  
+  # Resource limits and requests
+  resources:
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+    requests:
+      cpu: 500m
+      memory: 512Mi
+  
+  # Environment variables
+  env:
+    # Database
+    DATABASE_URL: "postgresql://$(POSTGRES_USER):$(POSTGRES_PASSWORD)@$(POSTGRES_HOST):5432/$(POSTGRES_DB)"
+    # Redis
+    REDIS_URL: "redis://$(REDIS_HOST):6379"
+    # JWT
+    JWT_SECRET_KEY: "$(JWT_SECRET)"
+    # TEE Configuration
+    TEE_ENABLE: "true"
+    TEE_PLATFORM: "software"
+    TEE_REQUIRE_ATTESTATION: "false"
+    # HSM Configuration
+    HSM_PROVIDER: "software"
+    HSM_ENABLE: "true"
+    # Security
+    RUST_LOG: "info"
+    CORS_ALLOWED_ORIGINS: "*"
+  
+  # Security context
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65534
+    runAsGroup: 65534
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    seccompProfile:
+      type: RuntimeDefault
+  
+  # Pod security context
+  podSecurityContext:
+    fsGroup: 65534
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  
+  # Liveness and readiness probes
+  livenessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 30
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+    successThreshold: 1
+  
+  readinessProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 10
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 3
+    successThreshold: 1
+  
+  # Startup probe
+  startupProbe:
+    httpGet:
+      path: /health
+      port: 8080
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    timeoutSeconds: 3
+    failureThreshold: 12
+    successThreshold: 1
+  
+  # Volume mounts
+  volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+    - name: app-cache
+      mountPath: /app/cache
+  
+  # Volumes
+  volumes:
+    - name: tmp
+      emptyDir: {}
+    - name: app-cache
+      emptyDir: {}
+  
+  # Node selector
+  nodeSelector: {}
+  
+  # Tolerations
+  tolerations: []
+  
+  # Affinity rules
+  affinity:
+    podAntiAffinity:
+      preferredDuringSchedulingIgnoredDuringExecution:
+        - weight: 100
+          podAffinityTerm:
+            labelSelector:
+              matchExpressions:
+                - key: app.kubernetes.io/name
+                  operator: In
+                  values:
+                    - erebor
+            topologyKey: kubernetes.io/hostname
+
+# Ingress configuration
+ingress:
+  enabled: true
+  className: "nginx"
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+  hosts:
+    - host: erebor.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: erebor-tls
+      hosts:
+        - erebor.example.com
+
+# Service Account
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+# RBAC
+rbac:
+  create: true
+
+# Pod Disruption Budget
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+  maxUnavailable: ""
+
+# Horizontal Pod Autoscaler
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+# Network Policy
+networkPolicy:
+  enabled: true
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              name: ingress-nginx
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: erebor
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 9090
+  egress:
+    - to: []
+      ports:
+        - protocol: TCP
+          port: 5432  # PostgreSQL
+        - protocol: TCP
+          port: 6379  # Redis
+        - protocol: TCP
+          port: 53    # DNS
+        - protocol: UDP
+          port: 53    # DNS
+        - protocol: TCP
+          port: 443   # HTTPS
+        - protocol: TCP
+          port: 80    # HTTP
+
+# PostgreSQL configuration
+postgresql:
+  enabled: true
+  auth:
+    existingSecret: ""
+    secretKeys:
+      adminPasswordKey: postgres-password
+      userPasswordKey: password
+    username: erebor
+    database: erebor
+  primary:
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: ""
+    resources:
+      limits:
+        cpu: 500m
+        memory: 1Gi
+      requests:
+        cpu: 250m
+        memory: 512Mi
+    securityContext:
+      enabled: true
+      runAsUser: 999
+      runAsGroup: 999
+      fsGroup: 999
+
+# Redis configuration  
+redis:
+  enabled: true
+  auth:
+    enabled: true
+    existingSecret: ""
+    existingSecretPasswordKey: password
+  master:
+    persistence:
+      enabled: true
+      size: 5Gi
+      storageClass: ""
+    resources:
+      limits:
+        cpu: 250m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+  replica:
+    replicaCount: 1
+    persistence:
+      enabled: true
+      size: 5Gi
+    resources:
+      limits:
+        cpu: 250m
+        memory: 512Mi
+      requests:
+        cpu: 100m
+        memory: 256Mi
+
+# Monitoring configuration
+monitoring:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    annotations: {}
+  grafanaDashboard:
+    enabled: true
+    namespace: ""
+    labels: {}
+
+# Secret configuration
+secrets:
+  create: true
+  data:
+    postgres-password: ""
+    redis-password: ""
+    jwt-secret: ""
+
+# ConfigMap configuration
+configMap:
+  create: true
+  data:
+    app.conf: |
+      # Erebor configuration
+      [database]
+      max_connections = 20
+      connection_timeout = 30
+      
+      [redis]
+      max_connections = 10
+      connection_timeout = 5
+      
+      [tee]
+      platform = "software"
+      require_attestation = false
+      max_report_age = 3600
+      
+      [hsm]
+      provider = "software"
+      key_hierarchy_levels = 3
+      
+      [security]
+      cors_max_age = 3600
+      rate_limit_per_minute = 100
+
+# Init containers
+initContainers:
+  - name: wait-for-postgres
+    image: postgres:15-alpine
+    command:
+      - sh
+      - -c
+      - |
+        until pg_isready -h $(POSTGRES_HOST) -p 5432 -U $(POSTGRES_USER); do
+          echo "Waiting for PostgreSQL..."
+          sleep 2
+        done
+        echo "PostgreSQL is ready!"
+    env:
+      - name: POSTGRES_HOST
+        value: "{{ include \"erebor.postgresql.host\" . }}"
+      - name: POSTGRES_USER
+        value: "{{ .Values.postgresql.auth.username }}"
+  
+  - name: wait-for-redis
+    image: redis:7-alpine
+    command:
+      - sh
+      - -c
+      - |
+        until redis-cli -h $(REDIS_HOST) -p 6379 ping; do
+          echo "Waiting for Redis..."
+          sleep 2
+        done
+        echo "Redis is ready!"
+    env:
+      - name: REDIS_HOST
+        value: "{{ include \"erebor.redis.host\" . }}"

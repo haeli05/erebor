@@ -1,0 +1,757 @@
+//! Anomaly Detection System for Transaction Monitoring
+//!
+//! This module implements a comprehensive anomaly detection system that
+//! monitors user transactions, builds behavioral baselines, and identifies
+//! suspicious activities using various risk signals and scoring algorithms.
+
+use crate::types::*;
+use crate::errors::{AnomalyError, Result};
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
+use chrono::{DateTime, Utc, Duration, Timelike, Weekday};
+use tracing::{info, debug, warn, error};
+
+/// Main anomaly detection engine
+#[derive(Debug)]
+pub struct AnomalyDetector {
+    /// User behavioral baselines
+    pub baselines: HashMap<Uuid, BehavioralBaseline>,
+    /// Risk signal configurations
+    pub risk_config: RiskConfiguration,
+    /// Alert history
+    pub alerts: HashMap<Uuid, Vec<SecurityAlert>>,
+    /// Transaction history for analysis
+    pub transaction_history: HashMap<Uuid, Vec<Transaction>>,
+}
+
+/// Configuration for risk signals and thresholds
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskConfiguration {
+    /// Amount deviation thresholds
+    pub amount_thresholds: AmountThresholds,
+    /// Time-based risk parameters
+    pub time_thresholds: TimeThresholds,
+    /// Recipient risk parameters
+    pub recipient_thresholds: RecipientThresholds,
+    /// Chain risk parameters
+    pub chain_thresholds: ChainThresholds,
+    /// Overall risk scoring weights
+    pub signal_weights: HashMap<RiskSignalType, u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmountThresholds {
+    pub unusual_multiplier: f64,        // 10.0x typical amount
+    pub high_value_threshold: u64,      // Absolute high value threshold
+    pub micro_transaction_threshold: u64, // Unusually small amounts
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeThresholds {
+    pub unusual_hour_weight: u8,        // Weight for unusual hours
+    pub rapid_succession_minutes: u64,   // Minutes between rapid transactions
+    pub max_daily_transactions: u32,     // Max normal daily transaction count
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecipientThresholds {
+    pub new_recipient_weight: u8,       // Weight for new recipients
+    pub suspicious_pattern_threshold: u8, // Threshold for suspicious patterns
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChainThresholds {
+    pub new_chain_weight: u8,           // Weight for unusual chains
+    pub cross_chain_weight: u8,         // Weight for cross-chain activity
+}
+
+impl Default for RiskConfiguration {
+    fn default() -> Self {
+        let mut signal_weights = HashMap::new();
+        signal_weights.insert(RiskSignalType::UnusualAmount, 25);
+        signal_weights.insert(RiskSignalType::NewRecipient, 15);
+        signal_weights.insert(RiskSignalType::UnusualTime, 10);
+        signal_weights.insert(RiskSignalType::RapidSuccession, 20);
+        signal_weights.insert(RiskSignalType::DifferentChain, 10);
+        signal_weights.insert(RiskSignalType::UnverifiedContract, 30);
+        signal_weights.insert(RiskSignalType::HighValueTransfer, 20);
+        signal_weights.insert(RiskSignalType::SuspiciousRecipient, 35);
+
+        Self {
+            amount_thresholds: AmountThresholds {
+                unusual_multiplier: 10.0,
+                high_value_threshold: 10_000_000_000, // 10 ETH in wei
+                micro_transaction_threshold: 1_000_000, // 0.001 ETH in wei
+            },
+            time_thresholds: TimeThresholds {
+                unusual_hour_weight: 15,
+                rapid_succession_minutes: 5,
+                max_daily_transactions: 50,
+            },
+            recipient_thresholds: RecipientThresholds {
+                new_recipient_weight: 15,
+                suspicious_pattern_threshold: 3,
+            },
+            chain_thresholds: ChainThresholds {
+                new_chain_weight: 10,
+                cross_chain_weight: 15,
+            },
+            signal_weights,
+        }
+    }
+}
+
+/// Statistical analysis for behavioral patterns
+#[derive(Debug, Clone)]
+struct StatisticalAnalysis {
+    pub mean: f64,
+    pub median: f64,
+    pub std_dev: f64,
+    pub variance: f64,
+    pub percentiles: HashMap<u8, f64>,
+}
+
+impl AnomalyDetector {
+    /// Create a new anomaly detector
+    pub fn new() -> Self {
+        Self {
+            baselines: HashMap::new(),
+            risk_config: RiskConfiguration::default(),
+            alerts: HashMap::new(),
+            transaction_history: HashMap::new(),
+        }
+    }
+
+    /// Add transaction to user's history
+    pub fn record_transaction(&mut self, transaction: Transaction) -> Result<()> {
+        let user_id = transaction.user_id;
+        
+        // Add to transaction history
+        self.transaction_history.entry(user_id)
+            .or_insert_with(Vec::new)
+            .push(transaction.clone());
+
+        // Update behavioral baseline
+        self.update_behavioral_baseline(user_id)?;
+
+        debug!("Recorded transaction {} for user {}", transaction.id, user_id);
+        Ok(())
+    }
+
+    /// Assess risk for a new transaction
+    pub fn assess_transaction_risk(&mut self, transaction: &Transaction) -> Result<RiskAssessment> {
+        let user_id = transaction.user_id;
+        
+        // Get user's baseline (create if doesn't exist)
+        let baseline = self.get_or_create_baseline(user_id)?;
+        
+        // Collect risk signals
+        let mut signals = Vec::new();
+        let mut total_risk_score = 0u16;
+
+        // Analyze amount patterns
+        if let Some(amount_signals) = self.analyze_amount_patterns(transaction, baseline)? {
+            for signal in amount_signals {
+                let weight = *self.risk_config.signal_weights.get(&signal.signal_type).unwrap_or(&0);
+                total_risk_score += weight as u16;
+                signals.push(signal);
+            }
+        }
+
+        // Analyze temporal patterns
+        if let Some(time_signals) = self.analyze_temporal_patterns(transaction, baseline)? {
+            for signal in time_signals {
+                let weight = *self.risk_config.signal_weights.get(&signal.signal_type).unwrap_or(&0);
+                total_risk_score += weight as u16;
+                signals.push(signal);
+            }
+        }
+
+        // Analyze recipient patterns
+        if let Some(recipient_signals) = self.analyze_recipient_patterns(transaction, baseline)? {
+            for signal in recipient_signals {
+                let weight = *self.risk_config.signal_weights.get(&signal.signal_type).unwrap_or(&0);
+                total_risk_score += weight as u16;
+                signals.push(signal);
+            }
+        }
+
+        // Analyze chain patterns
+        if let Some(chain_signals) = self.analyze_chain_patterns(transaction, baseline)? {
+            for signal in chain_signals {
+                let weight = *self.risk_config.signal_weights.get(&signal.signal_type).unwrap_or(&0);
+                total_risk_score += weight as u16;
+                signals.push(signal);
+            }
+        }
+
+        // Analyze contract interactions
+        if let Some(contract_signals) = self.analyze_contract_patterns(transaction)? {
+            for signal in contract_signals {
+                let weight = *self.risk_config.signal_weights.get(&signal.signal_type).unwrap_or(&0);
+                total_risk_score += weight as u16;
+                signals.push(signal);
+            }
+        }
+
+        // Analyze rapid succession
+        if let Some(succession_signals) = self.analyze_rapid_succession(transaction, user_id)? {
+            for signal in succession_signals {
+                let weight = *self.risk_config.signal_weights.get(&signal.signal_type).unwrap_or(&0);
+                total_risk_score += weight as u16;
+                signals.push(signal);
+            }
+        }
+
+        // Cap risk score at 100
+        let final_risk_score = std::cmp::min(total_risk_score, 100) as u8;
+
+        // Determine risk level
+        let risk_level = match final_risk_score {
+            0..=30 => RiskLevel::Low,
+            31..=70 => RiskLevel::Medium,
+            71..=100 => RiskLevel::High,
+        };
+
+        // Determine recommended action
+        let recommendation = match risk_level {
+            RiskLevel::Low => RecommendedAction::Allow,
+            RiskLevel::Medium => RecommendedAction::RequireAdditionalAuth,
+            RiskLevel::High => RecommendedAction::Block,
+        };
+
+        let assessment = RiskAssessment {
+            transaction_id: transaction.id,
+            risk_score: final_risk_score,
+            risk_level,
+            signals,
+            recommendation,
+            assessed_at: Utc::now(),
+        };
+
+        // Generate alerts for high-risk transactions
+        if final_risk_score >= 70 {
+            self.generate_security_alert(user_id, transaction, &assessment)?;
+        }
+
+        info!("Risk assessment for transaction {}: score={}, level={:?}", 
+              transaction.id, final_risk_score, risk_level);
+
+        Ok(assessment)
+    }
+
+    /// Update user's behavioral baseline
+    pub fn update_behavioral_baseline(&mut self, user_id: Uuid) -> Result<()> {
+        let transactions = self.transaction_history.get(&user_id)
+            .ok_or(AnomalyError::InsufficientHistory { user_id })?;
+
+        if transactions.len() < 10 {
+            return Err(AnomalyError::InsufficientHistory { user_id }.into());
+        }
+
+        // Analyze recent transactions (last 30 days)
+        let thirty_days_ago = Utc::now() - Duration::days(30);
+        let recent_transactions: Vec<_> = transactions.iter()
+            .filter(|tx| tx.timestamp > thirty_days_ago)
+            .collect();
+
+        if recent_transactions.is_empty() {
+            return Err(AnomalyError::InsufficientHistory { user_id }.into());
+        }
+
+        // Analyze amounts
+        let amounts: Vec<f64> = recent_transactions.iter()
+            .map(|tx| tx.amount as f64)
+            .collect();
+        let amount_profile = self.calculate_amount_profile(&amounts)?;
+
+        // Analyze recipients
+        let frequent_recipients: Vec<String> = recent_transactions.iter()
+            .fold(HashMap::new(), |mut acc, tx| {
+                *acc.entry(tx.recipient.clone()).or_insert(0) += 1;
+                acc
+            })
+            .into_iter()
+            .filter(|(_, count)| *count >= 3)
+            .map(|(recipient, _)| recipient)
+            .collect();
+
+        // Analyze timing patterns
+        let time_profile = self.calculate_time_profile(&recent_transactions)?;
+
+        // Analyze preferred chains
+        let preferred_chains: Vec<u64> = recent_transactions.iter()
+            .fold(HashMap::new(), |mut acc, tx| {
+                *acc.entry(tx.chain_id).or_insert(0) += 1;
+                acc
+            })
+            .into_iter()
+            .filter(|(_, count)| *count >= 5)
+            .map(|(chain_id, _)| chain_id)
+            .collect();
+
+        let baseline = BehavioralBaseline {
+            user_id,
+            typical_amounts: amount_profile,
+            frequent_recipients,
+            usual_times: time_profile,
+            preferred_chains,
+            last_updated: Utc::now(),
+        };
+
+        self.baselines.insert(user_id, baseline);
+        debug!("Updated behavioral baseline for user {}", user_id);
+        Ok(())
+    }
+
+    /// Generate security alert
+    fn generate_security_alert(
+        &mut self,
+        user_id: Uuid,
+        transaction: &Transaction,
+        assessment: &RiskAssessment,
+    ) -> Result<()> {
+        let alert_type = match assessment.risk_score {
+            90..=100 => AlertType::UnauthorizedAccess,
+            80..=89 => AlertType::SuspiciousActivity,
+            _ => AlertType::HighRiskTransaction,
+        };
+
+        let severity = match assessment.risk_score {
+            95..=100 => AlertSeverity::Emergency,
+            85..=94 => AlertSeverity::Critical,
+            70..=84 => AlertSeverity::Warning,
+            _ => AlertSeverity::Info,
+        };
+
+        let mut metadata = HashMap::new();
+        metadata.insert("risk_score".to_string(), assessment.risk_score.to_string());
+        metadata.insert("chain_id".to_string(), transaction.chain_id.to_string());
+        metadata.insert("amount".to_string(), transaction.amount.to_string());
+        metadata.insert("recipient".to_string(), transaction.recipient.clone());
+
+        let alert = SecurityAlert {
+            id: Uuid::new_v4(),
+            user_id,
+            alert_type,
+            severity,
+            title: format!("High-risk transaction detected (Score: {})", assessment.risk_score),
+            description: format!(
+                "Transaction {} to {} for {} on chain {} triggered {} risk signals",
+                transaction.id,
+                transaction.recipient,
+                transaction.amount,
+                transaction.chain_id,
+                assessment.signals.len()
+            ),
+            transaction_id: Some(transaction.id),
+            metadata,
+            created_at: Utc::now(),
+            acknowledged: false,
+        };
+
+        self.alerts.entry(user_id)
+            .or_insert_with(Vec::new)
+            .push(alert.clone());
+
+        warn!("Generated security alert {} for user {} (risk score: {})", 
+              alert.id, user_id, assessment.risk_score);
+        Ok(())
+    }
+
+    /// Get or create baseline for user
+    fn get_or_create_baseline(&mut self, user_id: Uuid) -> Result<&BehavioralBaseline> {
+        if !self.baselines.contains_key(&user_id) {
+            // Try to create baseline if we have transaction history
+            if self.transaction_history.contains_key(&user_id) {
+                self.update_behavioral_baseline(user_id)?;
+            } else {
+                return Err(AnomalyError::BaselineNotFound { user_id }.into());
+            }
+        }
+        
+        self.baselines.get(&user_id)
+            .ok_or(AnomalyError::BaselineNotFound { user_id }.into())
+    }
+
+    /// Analyze amount-based risk signals
+    fn analyze_amount_patterns(
+        &self,
+        transaction: &Transaction,
+        baseline: &BehavioralBaseline,
+    ) -> Result<Option<Vec<RiskSignal>>> {
+        let mut signals = Vec::new();
+        let amount = transaction.amount as f64;
+
+        // Check if amount is unusually high compared to baseline
+        if amount > baseline.typical_amounts.mean * self.risk_config.amount_thresholds.unusual_multiplier {
+            signals.push(RiskSignal {
+                signal_type: RiskSignalType::UnusualAmount,
+                weight: 25,
+                description: format!(
+                    "Transaction amount ({}) is {:.1}x higher than typical ({})",
+                    transaction.amount,
+                    amount / baseline.typical_amounts.mean,
+                    baseline.typical_amounts.mean as u64
+                ),
+                confidence: 0.8,
+            });
+        }
+
+        // Check for absolute high-value transfer
+        if transaction.amount > self.risk_config.amount_thresholds.high_value_threshold {
+            signals.push(RiskSignal {
+                signal_type: RiskSignalType::HighValueTransfer,
+                weight: 20,
+                description: format!(
+                    "High-value transfer of {} detected",
+                    transaction.amount
+                ),
+                confidence: 0.9,
+            });
+        }
+
+        // Check for micro-transactions (potential spam/testing)
+        if transaction.amount < self.risk_config.amount_thresholds.micro_transaction_threshold {
+            signals.push(RiskSignal {
+                signal_type: RiskSignalType::UnusualAmount,
+                weight: 10,
+                description: "Unusually small transaction amount detected".to_string(),
+                confidence: 0.6,
+            });
+        }
+
+        if signals.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(signals))
+        }
+    }
+
+    /// Analyze temporal patterns
+    fn analyze_temporal_patterns(
+        &self,
+        transaction: &Transaction,
+        baseline: &BehavioralBaseline,
+    ) -> Result<Option<Vec<RiskSignal>>> {
+        let mut signals = Vec::new();
+        let tx_hour = transaction.timestamp.hour() as u8;
+        let tx_weekday = transaction.timestamp.weekday().num_days_from_monday() as u8;
+
+        // Check if transaction is at unusual time
+        if !baseline.usual_times.usual_hours.contains(&tx_hour) {
+            signals.push(RiskSignal {
+                signal_type: RiskSignalType::UnusualTime,
+                weight: self.risk_config.time_thresholds.unusual_hour_weight,
+                description: format!("Transaction at unusual hour: {}:00", tx_hour),
+                confidence: 0.7,
+            });
+        }
+
+        // Check if transaction is on unusual day
+        if !baseline.usual_times.usual_days.contains(&tx_weekday) {
+            signals.push(RiskSignal {
+                signal_type: RiskSignalType::UnusualTime,
+                weight: 10,
+                description: format!("Transaction on unusual day of week"),
+                confidence: 0.6,
+            });
+        }
+
+        if signals.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(signals))
+        }
+    }
+
+    /// Analyze recipient patterns
+    fn analyze_recipient_patterns(
+        &self,
+        transaction: &Transaction,
+        baseline: &BehavioralBaseline,
+    ) -> Result<Option<Vec<RiskSignal>>> {
+        let mut signals = Vec::new();
+
+        // Check if recipient is new
+        if !baseline.frequent_recipients.contains(&transaction.recipient) {
+            signals.push(RiskSignal {
+                signal_type: RiskSignalType::NewRecipient,
+                weight: self.risk_config.recipient_thresholds.new_recipient_weight,
+                description: format!("Transaction to new recipient: {}", transaction.recipient),
+                confidence: 0.8,
+            });
+        }
+
+        // Check for suspicious recipient patterns (simplified)
+        if self.is_suspicious_recipient(&transaction.recipient)? {
+            signals.push(RiskSignal {
+                signal_type: RiskSignalType::SuspiciousRecipient,
+                weight: 35,
+                description: "Transaction to potentially suspicious recipient".to_string(),
+                confidence: 0.9,
+            });
+        }
+
+        if signals.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(signals))
+        }
+    }
+
+    /// Analyze chain patterns
+    fn analyze_chain_patterns(
+        &self,
+        transaction: &Transaction,
+        baseline: &BehavioralBaseline,
+    ) -> Result<Option<Vec<RiskSignal>>> {
+        let mut signals = Vec::new();
+
+        // Check if chain is new/unusual for user
+        if !baseline.preferred_chains.contains(&transaction.chain_id) {
+            signals.push(RiskSignal {
+                signal_type: RiskSignalType::DifferentChain,
+                weight: self.risk_config.chain_thresholds.new_chain_weight,
+                description: format!("Transaction on unusual chain: {}", transaction.chain_id),
+                confidence: 0.7,
+            });
+        }
+
+        if signals.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(signals))
+        }
+    }
+
+    /// Analyze contract interaction patterns
+    fn analyze_contract_patterns(&self, transaction: &Transaction) -> Result<Option<Vec<RiskSignal>>> {
+        let mut signals = Vec::new();
+
+        // Check for unverified contract interaction
+        if let Some(contract_address) = &transaction.contract_address {
+            if !self.is_verified_contract(contract_address)? {
+                signals.push(RiskSignal {
+                    signal_type: RiskSignalType::UnverifiedContract,
+                    weight: 30,
+                    description: format!(
+                        "Interaction with unverified contract: {}",
+                        contract_address
+                    ),
+                    confidence: 0.8,
+                });
+            }
+        }
+
+        if signals.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(signals))
+        }
+    }
+
+    /// Analyze rapid succession patterns
+    fn analyze_rapid_succession(
+        &self,
+        transaction: &Transaction,
+        user_id: Uuid,
+    ) -> Result<Option<Vec<RiskSignal>>> {
+        let mut signals = Vec::new();
+
+        if let Some(user_transactions) = self.transaction_history.get(&user_id) {
+            let recent_threshold = transaction.timestamp - Duration::minutes(
+                self.risk_config.time_thresholds.rapid_succession_minutes as i64
+            );
+
+            let recent_count = user_transactions.iter()
+                .filter(|tx| tx.timestamp > recent_threshold)
+                .count();
+
+            if recent_count >= 3 {
+                signals.push(RiskSignal {
+                    signal_type: RiskSignalType::RapidSuccession,
+                    weight: 20,
+                    description: format!(
+                        "{} transactions in {} minutes",
+                        recent_count,
+                        self.risk_config.time_thresholds.rapid_succession_minutes
+                    ),
+                    confidence: 0.9,
+                });
+            }
+        }
+
+        if signals.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(signals))
+        }
+    }
+
+    /// Check if recipient address is suspicious (simplified heuristic)
+    fn is_suspicious_recipient(&self, address: &str) -> Result<bool> {
+        // Simplified suspicious patterns
+        let suspicious_patterns = [
+            "0x0000000000000000", // Burn addresses
+            "0x1111111111111111", // Pattern addresses
+            "deadbeef", // Test patterns
+        ];
+
+        for pattern in &suspicious_patterns {
+            if address.to_lowercase().contains(pattern) {
+                return Ok(true);
+            }
+        }
+
+        Ok(false)
+    }
+
+    /// Check if contract is verified (simplified)
+    fn is_verified_contract(&self, _contract_address: &str) -> Result<bool> {
+        // In practice, this would check against a database of verified contracts
+        // For now, assume all contracts are unverified for demonstration
+        Ok(false)
+    }
+
+    /// Calculate statistical profile for amounts
+    fn calculate_amount_profile(&self, amounts: &[f64]) -> Result<AmountProfile> {
+        if amounts.is_empty() {
+            return Err(AnomalyError::InsufficientHistory { user_id: Uuid::nil() }.into());
+        }
+
+        let mean = amounts.iter().sum::<f64>() / amounts.len() as f64;
+        
+        let mut sorted_amounts = amounts.to_vec();
+        sorted_amounts.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let median = sorted_amounts[sorted_amounts.len() / 2];
+
+        let variance = amounts.iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>() / amounts.len() as f64;
+        let std_dev = variance.sqrt();
+
+        let mut percentiles = HashMap::new();
+        percentiles.insert(25, sorted_amounts[sorted_amounts.len() / 4]);
+        percentiles.insert(50, median);
+        percentiles.insert(75, sorted_amounts[3 * sorted_amounts.len() / 4]);
+        percentiles.insert(90, sorted_amounts[9 * sorted_amounts.len() / 10]);
+        percentiles.insert(95, sorted_amounts[95 * sorted_amounts.len() / 100]);
+
+        Ok(AmountProfile {
+            mean,
+            median,
+            std_dev,
+            percentiles,
+        })
+    }
+
+    /// Calculate time-based behavioral profile
+    fn calculate_time_profile(&self, transactions: &[&Transaction]) -> Result<TimeProfile> {
+        let mut hour_counts = HashMap::new();
+        let mut day_counts = HashMap::new();
+
+        for tx in transactions {
+            let hour = tx.timestamp.hour() as u8;
+            let day = tx.timestamp.weekday().num_days_from_monday() as u8;
+
+            *hour_counts.entry(hour).or_insert(0) += 1;
+            *day_counts.entry(day).or_insert(0) += 1;
+        }
+
+        // Consider hours/days with at least 2 transactions as "usual"
+        let usual_hours = hour_counts.into_iter()
+            .filter(|(_, count)| *count >= 2)
+            .map(|(hour, _)| hour)
+            .collect();
+
+        let usual_days = day_counts.into_iter()
+            .filter(|(_, count)| *count >= 2)
+            .map(|(day, _)| day)
+            .collect();
+
+        Ok(TimeProfile {
+            usual_hours,
+            usual_days,
+            timezone: "UTC".to_string(), // Simplified
+        })
+    }
+
+    /// Get user's security alerts
+    pub fn get_user_alerts(&self, user_id: Uuid) -> Vec<&SecurityAlert> {
+        self.alerts.get(&user_id)
+            .map(|alerts| alerts.iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Acknowledge security alert
+    pub fn acknowledge_alert(&mut self, user_id: Uuid, alert_id: Uuid) -> Result<()> {
+        if let Some(alerts) = self.alerts.get_mut(&user_id) {
+            if let Some(alert) = alerts.iter_mut().find(|a| a.id == alert_id) {
+                alert.acknowledged = true;
+                info!("Acknowledged alert {} for user {}", alert_id, user_id);
+                return Ok(());
+            }
+        }
+
+        Err(AnomalyError::AlertCreationFailed("Alert not found".to_string()).into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_anomaly_detector_creation() {
+        let detector = AnomalyDetector::new();
+        assert!(detector.baselines.is_empty());
+        assert!(detector.alerts.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_transaction_recording() {
+        let mut detector = AnomalyDetector::new();
+        let user_id = Uuid::new_v4();
+
+        let transaction = Transaction {
+            id: Uuid::new_v4(),
+            user_id,
+            amount: 1_000_000,
+            recipient: "0x742d35cc6634c0532925a3b8d3ea9e89e4c7a0ef".to_string(),
+            chain_id: 1,
+            contract_address: None,
+            timestamp: Utc::now(),
+            transaction_type: TransactionType::Transfer,
+        };
+
+        // Recording should fail initially due to insufficient history
+        let result = detector.record_transaction(transaction.clone());
+        assert!(result.is_ok());
+        
+        // But transaction should be in history
+        assert_eq!(detector.transaction_history.get(&user_id).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_risk_configuration_defaults() {
+        let config = RiskConfiguration::default();
+        assert!(config.amount_thresholds.unusual_multiplier > 1.0);
+        assert!(!config.signal_weights.is_empty());
+        assert!(config.signal_weights.contains_key(&RiskSignalType::UnusualAmount));
+    }
+
+    #[tokio::test]
+    async fn test_suspicious_recipient_detection() {
+        let detector = AnomalyDetector::new();
+        
+        // Test suspicious patterns
+        assert!(detector.is_suspicious_recipient("0x0000000000000000000000000000000000000000").unwrap());
+        assert!(detector.is_suspicious_recipient("0xdeadbeef12345678").unwrap());
+        
+        // Test normal address
+        assert!(!detector.is_suspicious_recipient("0x742d35cc6634c0532925a3b8d3ea9e89e4c7a0ef").unwrap());
+    }
+}

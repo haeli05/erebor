@@ -1,0 +1,272 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use uuid::Uuid;
+use chrono::{DateTime, Utc};
+use k256::{ecdsa::VerifyingKey, ProjectivePoint};
+use zeroize::{Zeroize, ZeroizeOnDrop};
+
+/// Party identifier in the MPC protocol
+pub type PartyId = u32;
+
+/// Threshold parameter (minimum signatures required)
+pub type Threshold = u32;
+
+/// MPC session identifier
+pub type SessionId = Uuid;
+
+/// Share identifier for secret sharing
+pub type ShareId = u32;
+
+/// Public key share for verification
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublicKeyShare {
+    pub party_id: PartyId,
+    pub public_key: VerifyingKey,
+    pub commitment: Vec<ProjectivePoint>,
+}
+
+/// Private key share (sensitive data)
+#[derive(Debug, Clone, Zeroize, ZeroizeOnDrop)]
+pub struct PrivateKeyShare {
+    pub party_id: PartyId,
+    pub share: k256::Scalar,
+    pub nonce_shares: HashMap<SessionId, k256::Scalar>,
+}
+
+/// DKG (Distributed Key Generation) configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DkgConfig {
+    pub parties: Vec<PartyId>,
+    pub threshold: Threshold,
+    pub session_id: SessionId,
+    pub timeout_ms: u64,
+}
+
+/// DKG result containing the generated key material
+#[derive(Debug, Clone)]
+pub struct DkgResult {
+    pub public_key: VerifyingKey,
+    pub private_share: PrivateKeyShare,
+    pub public_shares: HashMap<PartyId, PublicKeyShare>,
+    pub session_id: SessionId,
+}
+
+/// Signing request
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SigningRequest {
+    pub session_id: SessionId,
+    pub message_hash: [u8; 32],
+    pub signers: Vec<PartyId>,
+    pub threshold: Threshold,
+}
+
+/// Partial signature from a party
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PartialSignature {
+    pub party_id: PartyId,
+    pub session_id: SessionId,
+    pub signature_share: Vec<u8>,
+    pub commitment: ProjectivePoint,
+}
+
+/// Complete threshold signature
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThresholdSignature {
+    pub signature: k256::ecdsa::Signature,
+    pub signers: Vec<PartyId>,
+    pub session_id: SessionId,
+    pub timestamp: DateTime<Utc>,
+}
+
+/// Guardian information for social recovery
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Guardian {
+    pub id: Uuid,
+    pub guardian_type: GuardianType,
+    pub contact_info: String,
+    pub public_key: Option<VerifyingKey>,
+    pub added_at: DateTime<Utc>,
+    pub active: bool,
+}
+
+/// Types of guardians supported
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum GuardianType {
+    Email,
+    Phone,
+    WalletAddress,
+    HardwareKey,
+    TrustedContact,
+}
+
+/// Recovery request initiated by user
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecoveryRequest {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub threshold: u32,
+    pub total_guardians: u32,
+    pub initiated_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub status: RecoveryStatus,
+    pub approvals: Vec<GuardianApproval>,
+    pub recovery_data: Option<Vec<u8>>, // Encrypted recovery shares
+}
+
+/// Recovery request status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RecoveryStatus {
+    Pending,
+    Approved,
+    Rejected,
+    Expired,
+    Completed,
+}
+
+/// Guardian approval for recovery
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GuardianApproval {
+    pub guardian_id: Uuid,
+    pub approved: bool,
+    pub signature: Option<Vec<u8>>,
+    pub approved_at: DateTime<Utc>,
+    pub ip_address: Option<String>,
+}
+
+/// Transaction for anomaly detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Transaction {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub amount: u64,
+    pub recipient: String,
+    pub chain_id: u64,
+    pub contract_address: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub transaction_type: TransactionType,
+}
+
+/// Transaction types
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TransactionType {
+    Transfer,
+    ContractCall,
+    TokenTransfer,
+    Swap,
+    Stake,
+    Bridge,
+}
+
+/// Risk assessment result
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskAssessment {
+    pub transaction_id: Uuid,
+    pub risk_score: u8, // 0-100
+    pub risk_level: RiskLevel,
+    pub signals: Vec<RiskSignal>,
+    pub recommendation: RecommendedAction,
+    pub assessed_at: DateTime<Utc>,
+}
+
+/// Risk levels
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RiskLevel {
+    Low,      // 0-30
+    Medium,   // 31-70
+    High,     // 71-100
+}
+
+/// Risk signals detected
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskSignal {
+    pub signal_type: RiskSignalType,
+    pub weight: u8,
+    pub description: String,
+    pub confidence: f64,
+}
+
+/// Types of risk signals
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RiskSignalType {
+    UnusualAmount,
+    NewRecipient,
+    UnusualTime,
+    RapidSuccession,
+    DifferentChain,
+    UnverifiedContract,
+    HighValueTransfer,
+    SuspiciousRecipient,
+    DeviceChange,
+    LocationChange,
+}
+
+/// Recommended actions based on risk assessment
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RecommendedAction {
+    Allow,
+    RequireAdditionalAuth,
+    Block,
+    Review,
+}
+
+/// User's behavioral baseline for anomaly detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BehavioralBaseline {
+    pub user_id: Uuid,
+    pub typical_amounts: AmountProfile,
+    pub frequent_recipients: Vec<String>,
+    pub usual_times: TimeProfile,
+    pub preferred_chains: Vec<u64>,
+    pub last_updated: DateTime<Utc>,
+}
+
+/// Amount profile for typical transaction amounts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AmountProfile {
+    pub mean: f64,
+    pub median: f64,
+    pub std_dev: f64,
+    pub percentiles: HashMap<u8, f64>, // 25th, 50th, 75th, 90th, 95th percentiles
+}
+
+/// Time profile for typical transaction times
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TimeProfile {
+    pub usual_hours: Vec<u8>,        // Hours of day (0-23)
+    pub usual_days: Vec<u8>,         // Days of week (0-6)
+    pub timezone: String,
+}
+
+/// Alert generated by anomaly detection
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecurityAlert {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub alert_type: AlertType,
+    pub severity: AlertSeverity,
+    pub title: String,
+    pub description: String,
+    pub transaction_id: Option<Uuid>,
+    pub metadata: HashMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub acknowledged: bool,
+}
+
+/// Types of security alerts
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AlertType {
+    HighRiskTransaction,
+    UnauthorizedAccess,
+    RecoveryAttempt,
+    SuspiciousActivity,
+    ThresholdViolation,
+}
+
+/// Alert severity levels
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AlertSeverity {
+    Info,
+    Warning,
+    Critical,
+    Emergency,
+}
