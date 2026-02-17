@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -71,27 +73,113 @@ pub enum BundlerError {
     NotFound,
     #[error("bundle submission failed: {0}")]
     SubmissionFailed(String),
+    #[error("gas price too high: {price}, max allowed: {max}")]
+    GasPriceTooHigh { price: u128, max: u128 },
+    #[error("sender rate limited")]
+    SenderRateLimited,
 }
 
-/// Validates a UserOperation.
+/// Per-sender rate limiting for gas griefing protection
+#[derive(Debug)]
+struct SenderRateLimit {
+    /// Number of ops submitted in current window
+    count: u32,
+    /// Window start time
+    window_start: Instant,
+}
+
+/// Rate limiter for UserOp submissions per sender
+#[derive(Debug)]
+pub struct UserOpRateLimiter {
+    /// sender -> rate limit entry
+    limits: Arc<Mutex<HashMap<[u8; 20], SenderRateLimit>>>,
+    /// Max ops per sender per window
+    max_ops_per_window: u32,
+    /// Rate limit window duration
+    window_duration: Duration,
+}
+
+impl UserOpRateLimiter {
+    pub fn new(max_ops_per_window: u32, window_duration: Duration) -> Self {
+        Self {
+            limits: Arc::new(Mutex::new(HashMap::new())),
+            max_ops_per_window,
+            window_duration,
+        }
+    }
+
+    pub fn check_rate_limit(&self, sender: [u8; 20]) -> Result<(), BundlerError> {
+        let mut limits = self.limits.lock().unwrap();
+        let now = Instant::now();
+        
+        let entry = limits.entry(sender).or_insert(SenderRateLimit {
+            count: 0,
+            window_start: now,
+        });
+
+        // Reset window if expired
+        if now.duration_since(entry.window_start) >= self.window_duration {
+            entry.count = 0;
+            entry.window_start = now;
+        }
+
+        // Check limit
+        if entry.count >= self.max_ops_per_window {
+            return Err(BundlerError::SenderRateLimited);
+        }
+
+        entry.count += 1;
+        Ok(())
+    }
+}
+
+/// Validates a UserOperation with gas griefing protection.
 pub fn validate_user_op(
     op: &UserOperation,
     expected_min_nonce: u64,
     max_gas_limit: u64,
+    rate_limiter: Option<&UserOpRateLimiter>,
 ) -> Result<(), BundlerError> {
+    // Maximum gas limit per UserOp (10M gas to prevent griefing)
+    const MAX_TOTAL_GAS: u64 = 10_000_000;
+    
     if op.nonce < expected_min_nonce {
         return Err(BundlerError::NonceTooLow {
             expected: expected_min_nonce,
             got: op.nonce,
         });
     }
+
     let total = op.total_gas();
+    
+    // Enforce absolute maximum gas limit
+    if total > MAX_TOTAL_GAS {
+        return Err(BundlerError::GasLimitExceeded(total, MAX_TOTAL_GAS));
+    }
+    
+    // Enforce configurable gas limit
     if total > max_gas_limit {
         return Err(BundlerError::GasLimitExceeded(total, max_gas_limit));
     }
+
+    // Validate gas price is reasonable (max 1000 gwei to prevent griefing)
+    const MAX_GAS_PRICE: u128 = 1000 * 1_000_000_000; // 1000 gwei
+    if op.max_fee_per_gas > MAX_GAS_PRICE {
+        return Err(BundlerError::GasPriceTooHigh { 
+            price: op.max_fee_per_gas, 
+            max: MAX_GAS_PRICE 
+        });
+    }
+
+    // Per-sender rate limiting
+    if let Some(limiter) = rate_limiter {
+        limiter.check_rate_limit(op.sender)?;
+    }
+
     if op.signature.is_empty() {
         return Err(BundlerError::InvalidSignature);
     }
+    
     Ok(())
 }
 
@@ -100,8 +188,13 @@ pub fn validate_user_op(
 pub struct UserOpMempool {
     ops: Mutex<HashMap<[u8; 32], UserOperation>>,
     max_size: usize,
+    /// Maximum memory usage in bytes (default 64MB)
+    max_memory_bytes: usize,
+    /// Current memory usage tracking
+    current_memory_bytes: Arc<std::sync::atomic::AtomicUsize>,
     entry_point: [u8; 20],
     chain_id: u64,
+    rate_limiter: UserOpRateLimiter,
 }
 
 impl UserOpMempool {
@@ -109,29 +202,58 @@ impl UserOpMempool {
         Self {
             ops: Mutex::new(HashMap::new()),
             max_size,
+            max_memory_bytes: 64 * 1024 * 1024, // 64MB default limit
+            current_memory_bytes: Arc::new(AtomicUsize::new(0)),
             entry_point,
             chain_id,
+            // Default: 10 ops per sender per 5 minutes
+            rate_limiter: UserOpRateLimiter::new(10, Duration::from_secs(300)),
         }
+    }
+
+    /// Estimate the memory size of a UserOperation
+    fn estimate_op_size(op: &UserOperation) -> usize {
+        // Estimate based on variable-length fields
+        std::mem::size_of::<UserOperation>()
+            + op.init_code.len()
+            + op.call_data.len()
+            + op.paymaster_and_data.len()
+            + op.signature.len()
     }
 
     /// Add a UserOp. Returns its hash.
     pub fn add(&self, op: UserOperation) -> Result<[u8; 32], BundlerError> {
         let hash = op.hash(&self.entry_point, self.chain_id);
+        let op_size = Self::estimate_op_size(&op);
+        
         let mut ops = self.ops.lock().unwrap();
+        
+        // Check count-based limit
         if ops.len() >= self.max_size {
             return Err(BundlerError::MempoolFull);
         }
+        
+        // Check memory-based limit
+        let current_memory = self.current_memory_bytes.load(Ordering::Acquire);
+        if current_memory + op_size > self.max_memory_bytes {
+            return Err(BundlerError::MempoolFull);
+        }
+        
         ops.insert(hash, op);
+        self.current_memory_bytes.fetch_add(op_size, Ordering::AcqRel);
         Ok(hash)
     }
 
     /// Remove a UserOp by hash.
     pub fn remove(&self, hash: &[u8; 32]) -> Result<UserOperation, BundlerError> {
-        self.ops
-            .lock()
-            .unwrap()
-            .remove(hash)
-            .ok_or(BundlerError::NotFound)
+        let mut ops = self.ops.lock().unwrap();
+        let op = ops.remove(hash).ok_or(BundlerError::NotFound)?;
+        
+        // Update memory tracking
+        let op_size = Self::estimate_op_size(&op);
+        self.current_memory_bytes.fetch_sub(op_size, Ordering::AcqRel);
+        
+        Ok(op)
     }
 
     /// Get a UserOp by hash.
@@ -255,7 +377,7 @@ impl Bundler {
         op: UserOperation,
         expected_min_nonce: u64,
     ) -> Result<[u8; 32], BundlerError> {
-        validate_user_op(&op, expected_min_nonce, self.max_gas_per_bundle)?;
+        validate_user_op(&op, expected_min_nonce, self.max_gas_per_bundle, Some(&self.mempool.rate_limiter))?;
         self.mempool.add(op)
     }
 

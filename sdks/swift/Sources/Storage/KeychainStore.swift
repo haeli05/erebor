@@ -181,10 +181,10 @@ public class KeychainStore {
         var accessControlFlags: SecAccessControlCreateFlags = []
         
         if requiresBiometric {
-            // Require biometric authentication
+            // Require biometric authentication with device passcode fallback
             accessControlFlags.insert(.biometryCurrentSet)
-            // Invalidate if biometry changes
-            accessControlFlags.insert(.biometryCurrentSet)
+            // Allow fallback to device passcode if biometry fails
+            accessControlFlags.insert(.devicePasscode)
         }
         
         var error: Unmanaged<CFError>?

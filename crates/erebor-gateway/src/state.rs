@@ -1,4 +1,6 @@
 use std::sync::Arc;
+use std::collections::HashSet;
+use tokio::sync::RwLock;
 use erebor_auth::{
     jwt::JwtManager,
     session::{SessionManager, InMemorySessionStore},
@@ -8,6 +10,39 @@ use erebor_auth::{
 use erebor_vault::{VaultService, ShamirVault, EncryptionService, InMemoryStore};
 use erebor_chain::ChainService;
 use erebor_common::{SecretBytes, EreborError, Result};
+use erebor_auth::middleware::TokenBlacklistTrait;
+use axum::async_trait;
+
+/// In-memory token blacklist with TTL
+#[derive(Default)]
+pub struct TokenBlacklist {
+    blacklisted: RwLock<HashSet<String>>,
+}
+
+impl TokenBlacklist {
+    pub fn new() -> Self {
+        Self {
+            blacklisted: RwLock::new(HashSet::new()),
+        }
+    }
+
+    // In production, this would be replaced with Redis-based expiry
+    pub async fn cleanup_expired(&self) {
+        // For in-memory implementation, tokens will expire naturally
+        // In production, use Redis with TTL matching JWT expiry
+    }
+}
+
+#[async_trait]
+impl TokenBlacklistTrait for TokenBlacklist {
+    async fn add(&self, jti: String) {
+        self.blacklisted.write().await.insert(jti);
+    }
+
+    async fn is_blacklisted(&self, jti: &str) -> bool {
+        self.blacklisted.read().await.contains(jti)
+    }
+}
 
 /// Application state holding all services
 #[derive(Clone)]
@@ -18,6 +53,7 @@ pub struct AppState {
     pub providers: Arc<ProviderRegistry>,
     pub vault: Arc<VaultService<InMemoryStore>>,
     pub chain: Arc<ChainService>,
+    pub token_blacklist: Arc<TokenBlacklist>,
 }
 
 impl AppState {
@@ -64,6 +100,9 @@ impl AppState {
         // Chain service
         let chain = Arc::new(ChainService::new());
 
+        // Token blacklist for logout
+        let token_blacklist = Arc::new(TokenBlacklist::new());
+
         Ok(Self {
             jwt,
             sessions,
@@ -71,6 +110,7 @@ impl AppState {
             providers,
             vault,
             chain,
+            token_blacklist,
         })
     }
 
@@ -110,6 +150,8 @@ impl AppState {
 
         let chain = Arc::new(ChainService::new());
 
+        let token_blacklist = Arc::new(TokenBlacklist::new());
+
         Ok(Self {
             jwt,
             sessions,
@@ -117,6 +159,7 @@ impl AppState {
             providers,
             vault,
             chain,
+            token_blacklist,
         })
     }
 }

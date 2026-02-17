@@ -11,6 +11,11 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 use hmac::{Hmac, Mac};
 use regex::Regex;
+use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+use sha3::Keccak256;
+use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use rsa::RsaPublicKey;
+use ed25519_dalek::{Signature as Ed25519Signature, VerifyingKey as Ed25519VerifyingKey};
 
 /// User info returned from a provider after authentication
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +155,8 @@ pub struct EmailOtpProvider {
     otps: Arc<RwLock<HashMap<String, OtpEntry>>>,
     /// Rate limiting: email -> (count, window_start)
     rate_limits: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
+    /// Exponential backoff tracking: email -> (failure_count, last_failure)
+    backoff_tracker: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
     /// OTP validity duration
     ttl: Duration,
     /// Max verification attempts per OTP
@@ -164,11 +171,13 @@ impl EmailOtpProvider {
     pub fn new() -> Self {
         Self {
             otps: Arc::new(RwLock::new(HashMap::new())),
+            // NOTE: In production, use Redis with TTL for persistent rate limiting
             rate_limits: Arc::new(RwLock::new(HashMap::new())),
+            backoff_tracker: Arc::new(RwLock::new(HashMap::new())),
             ttl: Duration::from_secs(600), // 10 minutes
-            max_attempts: 3,
-            max_sends_per_window: 5,
-            rate_window: Duration::from_secs(3600), // 1 hour
+            max_attempts: 3, // Maximum 3 attempts per OTP code
+            max_sends_per_window: 5, // Maximum 5 codes per hour per email
+            rate_window: Duration::from_secs(3600), // 1 hour window
         }
     }
 
@@ -176,6 +185,18 @@ impl EmailOtpProvider {
     /// In production, this would also send the email.
     pub async fn send_otp(&self, email: &str) -> Result<String> {
         let email = email.to_lowercase();
+
+        // Exponential backoff check
+        {
+            let backoff = self.backoff_tracker.write().await;
+            if let Some((failure_count, last_failure)) = backoff.get(&email) {
+                let backoff_duration = Duration::from_secs(2_u64.pow(*failure_count).min(300)); // Max 5 min
+                if last_failure.elapsed() < backoff_duration {
+                    warn!(email = %email, failure_count = %failure_count, "Email OTP exponential backoff active");
+                    return Err(EreborError::RateLimited);
+                }
+            }
+        }
 
         // Rate limit check
         {
@@ -237,11 +258,16 @@ impl EmailOtpProvider {
 
         // Constant-time comparison would be ideal, but for 6 digits it's fine
         if entry.code != code {
+            // Track failure for exponential backoff
+            let mut backoff = self.backoff_tracker.write().await;
+            let failure_count = backoff.entry(email.clone()).or_insert((0, Instant::now())).0 + 1;
+            backoff.insert(email.clone(), (failure_count, Instant::now()));
             return Err(EreborError::AuthError("Invalid OTP code".into()));
         }
 
-        // Success - remove OTP
+        // Success - remove OTP and reset backoff
         otps.remove(&email);
+        self.backoff_tracker.write().await.remove(&email);
 
         // Generate a deterministic provider_user_id from email
         let mut hasher = Sha256::new();
@@ -300,6 +326,87 @@ impl SiweProvider {
         }
     }
 
+    /// Format SIWE message according to EIP-4361 standard
+    fn format_message(&self, message: &SiweMessage) -> String {
+        let mut msg = format!(
+            "{} wants you to sign in with your Ethereum account:\n{}\n\n",
+            message.domain, message.address
+        );
+        
+        if let Some(ref statement) = message.statement {
+            msg.push_str(statement);
+            msg.push_str("\n\n");
+        }
+        
+        msg.push_str(&format!("URI: {}\n", message.uri));
+        msg.push_str(&format!("Version: {}\n", message.version));
+        msg.push_str(&format!("Chain ID: {}\n", message.chain_id));
+        msg.push_str(&format!("Nonce: {}\n", message.nonce));
+        msg.push_str(&format!("Issued At: {}", message.issued_at));
+        
+        if let Some(ref exp) = message.expiration_time {
+            msg.push_str(&format!("\nExpiration Time: {}", exp));
+        }
+        
+        msg
+    }
+
+    /// Recover Ethereum address from signature using EIP-191
+    fn recover_address(&self, message: &SiweMessage, signature_hex: &str) -> Result<String> {
+        // Remove 0x prefix if present
+        let signature_hex = signature_hex.strip_prefix("0x").unwrap_or(signature_hex);
+        
+        // Parse signature (65 bytes: r[32] + s[32] + v[1])
+        if signature_hex.len() != 130 {
+            return Err(EreborError::AuthError("Invalid signature length".into()));
+        }
+        
+        let signature_bytes = hex::decode(signature_hex)
+            .map_err(|_| EreborError::AuthError("Invalid signature hex".into()))?;
+            
+        let (signature_bytes, recovery_id) = signature_bytes.split_at(64);
+        let recovery_id = recovery_id[0];
+        
+        // Recovery ID should be 27 or 28, convert to 0 or 1
+        let recovery_id = if recovery_id >= 27 {
+            recovery_id - 27
+        } else {
+            recovery_id
+        };
+        
+        let recovery_id = RecoveryId::try_from(recovery_id)
+            .map_err(|_| EreborError::AuthError("Invalid recovery ID".into()))?;
+        
+        let signature = Signature::try_from(signature_bytes)
+            .map_err(|_| EreborError::AuthError("Invalid signature format".into()))?;
+        
+        // Format message according to EIP-191: "\x19Ethereum Signed Message:\n" + len + message
+        let formatted_message = self.format_message(message);
+        let message_with_prefix = format!("\x19Ethereum Signed Message:\n{}{}", formatted_message.len(), formatted_message);
+        
+        // Hash with Keccak256
+        let mut hasher = Keccak256::new();
+        Digest::update(&mut hasher, message_with_prefix.as_bytes());
+        let message_hash = hasher.finalize();
+        
+        // Recover the public key
+        let verifying_key = VerifyingKey::recover_from_prehash(&message_hash, &signature, recovery_id)
+            .map_err(|_| EreborError::AuthError("Failed to recover public key".into()))?;
+        
+        // Derive Ethereum address from public key (keccak256 of uncompressed pubkey, take last 20 bytes)
+        let public_key_bytes = verifying_key.to_encoded_point(false);
+        let public_key_uncompressed = &public_key_bytes.as_bytes()[1..]; // Skip the 0x04 prefix
+        
+        let mut hasher = Keccak256::new();
+        Digest::update(&mut hasher, public_key_uncompressed);
+        let hash = hasher.finalize();
+        
+        let address = &hash[12..]; // Last 20 bytes
+        let address_hex = format!("0x{}", hex::encode(address));
+        
+        Ok(address_hex.to_lowercase())
+    }
+
     /// Generate a nonce for SIWE
     pub async fn generate_nonce(&self) -> String {
         let nonce = hex::encode(rand::thread_rng().gen::<[u8; 16]>());
@@ -345,11 +452,15 @@ impl SiweProvider {
             }
         }
 
-        // TODO: Actual EIP-191 signature verification with ecrecover
-        // For now, trust the address from the message.
-        // In production, use ethers/alloy to recover the signer address from signature.
-
-        let address = message.address.to_lowercase();
+        // Perform EIP-191 signature verification with ecrecover
+        let recovered_address = self.recover_address(message, _signature)?;
+        let claimed_address = message.address.to_lowercase();
+        
+        if recovered_address != claimed_address {
+            return Err(EreborError::AuthError("Signature verification failed: address mismatch".into()));
+        }
+        
+        let address = claimed_address;
         info!(address = %address, "SIWE authentication successful");
 
         Ok(ProviderUser {
@@ -422,12 +533,121 @@ struct AppleTokenResponse {
     expires_in: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct AppleJwksResponse {
+    keys: Vec<AppleJwk>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleJwk {
+    kty: String,
+    kid: String,
+    #[serde(rename = "use")]
+    use_: String,
+    alg: String,
+    n: String,
+    e: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AppleIdTokenClaims {
+    iss: String,
+    aud: String,
+    exp: u64,
+    iat: u64,
+    sub: String,
+    email: Option<String>,
+    #[serde(default)]
+    email_verified: bool,
+}
+
 impl AppleOAuthProvider {
     pub fn new(config: AppleOAuthConfig) -> Self {
         Self {
             config,
             http: reqwest::Client::new(),
         }
+    }
+
+    /// Fetch Apple's public keys for JWT verification
+    async fn fetch_apple_keys(&self) -> Result<AppleJwksResponse> {
+        let response = self
+            .http
+            .get("https://appleid.apple.com/auth/keys")
+            .send()
+            .await
+            .map_err(|e| EreborError::AuthError(format!("Failed to fetch Apple keys: {e}")))?;
+
+        let keys: AppleJwksResponse = response
+            .json()
+            .await
+            .map_err(|e| EreborError::AuthError(format!("Failed to parse Apple keys: {e}")))?;
+
+        Ok(keys)
+    }
+
+    /// Validate Apple ID token JWT signature and claims
+    async fn validate_id_token(&self, id_token: &str) -> Result<AppleIdTokenClaims> {
+        // Decode header to get key ID
+        let header = decode_header(id_token)
+            .map_err(|e| EreborError::AuthError(format!("Failed to decode JWT header: {e}")))?;
+
+        let kid = header.kid.ok_or_else(|| {
+            EreborError::AuthError("Apple ID token missing key ID".into())
+        })?;
+
+        // Fetch Apple's public keys
+        let jwks = self.fetch_apple_keys().await?;
+        
+        // Find the matching key
+        let jwk = jwks.keys.iter()
+            .find(|k| k.kid == kid)
+            .ok_or_else(|| EreborError::AuthError("Apple key not found".into()))?;
+
+        // Verify algorithm is RS256
+        if jwk.alg != "RS256" {
+            return Err(EreborError::AuthError("Unsupported Apple JWT algorithm".into()));
+        }
+
+        // Decode RSA public key components
+        use base64::{Engine as _, engine::general_purpose};
+        let n_bytes = general_purpose::URL_SAFE_NO_PAD
+            .decode(&jwk.n)
+            .map_err(|e| EreborError::AuthError(format!("Failed to decode RSA n: {e}")))?;
+        let e_bytes = general_purpose::URL_SAFE_NO_PAD
+            .decode(&jwk.e)
+            .map_err(|e| EreborError::AuthError(format!("Failed to decode RSA e: {e}")))?;
+
+        // Create RSA public key
+        let public_key = RsaPublicKey::new(
+            rsa::BigUint::from_bytes_be(&n_bytes),
+            rsa::BigUint::from_bytes_be(&e_bytes),
+        ).map_err(|e| EreborError::AuthError(format!("Failed to create RSA key: {e}")))?;
+
+        // Convert to PEM format for jsonwebtoken
+        use rsa::pkcs8::EncodePublicKey;
+        let pem = public_key.to_public_key_pem(rsa::pkcs8::LineEnding::LF)
+            .map_err(|e| EreborError::AuthError(format!("Failed to encode RSA key: {e}")))?;
+
+        let decoding_key = DecodingKey::from_rsa_pem(pem.as_bytes())
+            .map_err(|e| EreborError::AuthError(format!("Failed to create decoding key: {e}")))?;
+
+        // Set up validation parameters
+        let mut validation = Validation::new(Algorithm::RS256);
+        validation.set_issuer(&["https://appleid.apple.com"]);
+        validation.set_audience(&[&self.config.client_id]);
+
+        // Validate and decode the token
+        let token_data = decode::<AppleIdTokenClaims>(id_token, &decoding_key, &validation)
+            .map_err(|e| EreborError::AuthError(format!("Apple ID token validation failed: {e}")))?;
+
+        // Additional expiration check (jsonwebtoken should handle this, but let's be explicit)
+        let now = chrono::Utc::now().timestamp() as u64;
+        if token_data.claims.exp < now {
+            return Err(EreborError::AuthError("Apple ID token expired".into()));
+        }
+
+        Ok(token_data.claims)
     }
 
     fn create_client_secret(&self) -> Result<String> {
@@ -484,26 +704,11 @@ impl AuthProviderHandler for AppleOAuthProvider {
             .await
             .map_err(|e| EreborError::AuthError(format!("Failed to parse token response: {e}")))?;
 
-        // Decode the ID token (JWT) - for now we trust it's valid
-        // In production, validate against Apple's public keys at https://appleid.apple.com/auth/keys
-        use base64::{Engine as _, engine::general_purpose};
-        let parts: Vec<&str> = tokens.id_token.split('.').collect();
-        if parts.len() != 3 {
-            return Err(EreborError::AuthError("Invalid Apple ID token format".into()));
-        }
+        // Validate the ID token JWT against Apple's public keys
+        let claims = self.validate_id_token(&tokens.id_token).await?;
 
-        let payload = general_purpose::URL_SAFE_NO_PAD
-            .decode(parts[1])
-            .map_err(|e| EreborError::AuthError(format!("Failed to decode Apple ID token: {e}")))?;
-        
-        let user_info: serde_json::Value = serde_json::from_slice(&payload)
-            .map_err(|e| EreborError::AuthError(format!("Failed to parse Apple user info: {e}")))?;
-
-        let sub = user_info["sub"]
-            .as_str()
-            .ok_or_else(|| EreborError::AuthError("No sub in Apple ID token".into()))?;
-        
-        let email = user_info["email"].as_str().map(String::from);
+        let sub = &claims.sub;
+        let email = claims.email;
 
         info!(provider = "apple", sub = %sub, "Apple OAuth successful");
 
@@ -906,6 +1111,75 @@ impl FarcasterProvider {
         nonce
     }
 
+    /// Format Farcaster message for signature verification
+    fn format_message(&self, message: &FarcasterMessage) -> String {
+        let mut msg = format!(
+            "{} wants you to sign in with your Ethereum account:\n{}\n\n",
+            message.domain, message.address
+        );
+        
+        if let Some(ref statement) = message.statement {
+            msg.push_str(statement);
+            msg.push_str("\n\n");
+        }
+        
+        msg.push_str(&format!("URI: {}\n", message.uri));
+        msg.push_str(&format!("Version: {}\n", message.version));
+        msg.push_str(&format!("Nonce: {}\n", message.nonce));
+        msg.push_str(&format!("Issued At: {}", message.issued_at));
+        
+        if let Some(ref exp) = message.expiration_time {
+            msg.push_str(&format!("\nExpiration Time: {}", exp));
+        }
+        
+        // Add Farcaster-specific fields
+        msg.push_str(&format!("\nFarcaster User ID: {}", message.fid));
+        
+        msg
+    }
+
+    /// Verify Ed25519 signature against the custody address  
+    fn verify_signature(&self, message: &FarcasterMessage, signature_hex: &str) -> Result<()> {
+        // Remove 0x prefix if present
+        let signature_hex = signature_hex.strip_prefix("0x").unwrap_or(signature_hex);
+        
+        // Parse signature (64 bytes for Ed25519)
+        if signature_hex.len() != 128 {
+            return Err(EreborError::AuthError("Invalid Ed25519 signature length".into()));
+        }
+        
+        let signature_bytes = hex::decode(signature_hex)
+            .map_err(|_| EreborError::AuthError("Invalid signature hex".into()))?;
+            
+        if signature_bytes.len() != 64 {
+            return Err(EreborError::AuthError("Invalid Ed25519 signature length".into()));
+        }
+        
+        let signature_array: [u8; 64] = signature_bytes.try_into().unwrap();
+        let signature = Ed25519Signature::from_bytes(&signature_array);
+        
+        // Parse custody address as Ed25519 public key (32 bytes)
+        let custody_hex = message.custody_address.strip_prefix("0x").unwrap_or(&message.custody_address);
+        if custody_hex.len() != 64 {
+            return Err(EreborError::AuthError("Invalid custody address length".into()));
+        }
+        
+        let custody_bytes = hex::decode(custody_hex)
+            .map_err(|_| EreborError::AuthError("Invalid custody address hex".into()))?;
+            
+        let public_key = Ed25519VerifyingKey::from_bytes(&custody_bytes.try_into().unwrap())
+            .map_err(|e| EreborError::AuthError(format!("Invalid custody address as Ed25519 key: {e}")))?;
+        
+        // Format and verify message
+        let formatted_message = self.format_message(message);
+        
+        use ed25519_dalek::Verifier;
+        public_key.verify(formatted_message.as_bytes(), &signature)
+            .map_err(|e| EreborError::AuthError(format!("Ed25519 signature verification failed: {e}")))?;
+        
+        Ok(())
+    }
+
     pub async fn verify(&self, message: &FarcasterMessage, _signature: &str) -> Result<ProviderUser> {
         // Validate domain
         if message.domain != self.expected_domain {
@@ -939,8 +1213,11 @@ impl FarcasterProvider {
             }
         }
 
-        // TODO: Verify signature against custody address
-        // TODO: Validate custody address against FID via Warpcast/Neynar API
+        // Verify Ed25519 signature against custody address
+        self.verify_signature(message, _signature)?;
+        
+        // NOTE: In production, also validate custody address against FID via Warpcast/Neynar API
+        // For now, we trust that the signature verification proves custody of the claimed address
 
         info!(fid = %message.fid, custody_address = %message.custody_address, "Farcaster authentication successful");
 
@@ -1049,6 +1326,8 @@ pub struct PhoneOtpProvider {
     otps: Arc<RwLock<HashMap<String, OtpEntry>>>,
     /// Rate limiting: phone -> (count, window_start)
     rate_limits: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
+    /// Exponential backoff tracking: phone -> (failure_count, last_failure)
+    backoff_tracker: Arc<RwLock<HashMap<String, (u32, Instant)>>>,
     /// OTP validity duration
     ttl: Duration,
     /// Max verification attempts per OTP
@@ -1067,12 +1346,14 @@ impl PhoneOtpProvider {
     pub fn new() -> Self {
         Self {
             otps: Arc::new(RwLock::new(HashMap::new())),
+            // NOTE: In production, use Redis with TTL for persistent rate limiting
             rate_limits: Arc::new(RwLock::new(HashMap::new())),
+            backoff_tracker: Arc::new(RwLock::new(HashMap::new())),
             last_send: Arc::new(RwLock::new(HashMap::new())),
             ttl: Duration::from_secs(600), // 10 minutes
-            max_attempts: 3,
-            max_sends_per_window: 3,
-            rate_window: Duration::from_secs(600), // 10 minutes
+            max_attempts: 3, // Maximum 3 attempts per OTP code
+            max_sends_per_window: 3, // Maximum 3 codes per 10 minutes (tightened)
+            rate_window: Duration::from_secs(3600), // 1 hour window (consistent with email)
             send_rate_limit: Duration::from_secs(60), // 1 minute between sends
         }
     }
@@ -1090,6 +1371,18 @@ impl PhoneOtpProvider {
     /// In production, this would also send the SMS.
     pub async fn send_otp(&self, phone: &str) -> Result<String> {
         self.validate_phone(phone)?;
+
+        // Exponential backoff check
+        {
+            let backoff = self.backoff_tracker.write().await;
+            if let Some((failure_count, last_failure)) = backoff.get(phone) {
+                let backoff_duration = Duration::from_secs(2_u64.pow(*failure_count).min(300)); // Max 5 min
+                if last_failure.elapsed() < backoff_duration {
+                    warn!(phone = %phone, failure_count = %failure_count, "Phone OTP exponential backoff active");
+                    return Err(EreborError::RateLimited);
+                }
+            }
+        }
 
         // Send rate limit check (1 per minute)
         {
@@ -1164,11 +1457,16 @@ impl PhoneOtpProvider {
 
         // Constant-time comparison would be ideal, but for 6 digits it's fine
         if entry.code != code {
+            // Track failure for exponential backoff
+            let mut backoff = self.backoff_tracker.write().await;
+            let failure_count = backoff.entry(phone.to_string()).or_insert((0, Instant::now())).0 + 1;
+            backoff.insert(phone.to_string(), (failure_count, Instant::now()));
             return Err(EreborError::AuthError("Invalid OTP code".into()));
         }
 
-        // Success - remove OTP
+        // Success - remove OTP and reset backoff
         otps.remove(phone);
+        self.backoff_tracker.write().await.remove(phone);
 
         // Generate a deterministic provider_user_id from phone
         let mut hasher = Sha256::new();

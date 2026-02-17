@@ -8,6 +8,12 @@ use erebor_auth::middleware::{auth_middleware, rate_limit_middleware, RateLimite
 use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
+
+// CSRF Protection Notice:
+// This API is designed for token-based authentication using Bearer tokens,
+// which are inherently CSRF-resistant as they require explicit inclusion
+// in request headers rather than being automatically sent by browsers.
+// No session cookies are used, eliminating CSRF attack vectors.
 use tracing_subscriber::EnvFilter;
 use state::AppState;
 
@@ -37,6 +43,7 @@ async fn main() {
         .layer(CorsLayer::permissive())
         // Add shared state
         .layer(axum::Extension(state.jwt.clone()))
+        .layer(axum::Extension(state.token_blacklist.clone() as Arc<dyn erebor_auth::middleware::TokenBlacklistTrait>))
         .layer(axum::Extension(rate_limiter))
         .with_state(state);
 

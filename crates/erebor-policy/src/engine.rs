@@ -80,24 +80,35 @@ impl PolicyEngine {
         };
         self.aggregations.record(&event);
 
-        // Sort rules by priority (lower number = higher priority)
-        let mut rules = self.rules.clone();
-        rules.sort_by_key(|rule| rule.priority);
-
-        // Evaluate each enabled rule
-        for rule in &rules {
-            if !rule.enabled {
-                continue;
+        // Process deny rules FIRST (regardless of priority)
+        // This ensures deny rules always take precedence
+        let enabled_rules: Vec<_> = self.rules.iter().filter(|rule| rule.enabled).collect();
+        
+        // First pass: Check all deny rules
+        for rule in &enabled_rules {
+            if let RuleAction::Deny { reason } = &rule.action {
+                if self.evaluate_rule(rule, ctx) {
+                    return PolicyDecision::Deny {
+                        rule_id: rule.id,
+                        reason: reason.clone(),
+                    };
+                }
             }
+        }
 
+        // Second pass: Process non-deny rules by priority
+        let mut non_deny_rules: Vec<_> = enabled_rules.into_iter()
+            .filter(|rule| !matches!(rule.action, RuleAction::Deny { .. }))
+            .collect();
+        non_deny_rules.sort_by_key(|rule| rule.priority);
+
+        for rule in &non_deny_rules {
             if self.evaluate_rule(rule, ctx) {
                 match &rule.action {
                     RuleAction::Allow => return PolicyDecision::Allow,
-                    RuleAction::Deny { reason } => {
-                        return PolicyDecision::Deny {
-                            rule_id: rule.id,
-                            reason: reason.clone(),
-                        };
+                    RuleAction::Deny { .. } => {
+                        // This should never happen due to filtering above
+                        unreachable!("Deny rules should have been processed in first pass");
                     }
                     RuleAction::RequireApproval { quorum_id } => {
                         let approval_context = ApprovalContext {

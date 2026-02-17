@@ -19,7 +19,7 @@ chrono = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
-vsss-rs = { workspace = true }
+sharks = "0.5"
 hmac = "0.12"
 tiny-keccak = { version = "2", features = ["keccak"] }
 ed25519-dalek = { workspace = true }

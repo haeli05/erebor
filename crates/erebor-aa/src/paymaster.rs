@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::Arc;
 
 use chrono::Utc;
 use sha2::{Digest, Sha256};
@@ -290,21 +291,34 @@ impl Paymaster for Erc20Paymaster {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
+struct SpendingEntry {
+    /// Total spent in rolling window
+    amount: Arc<AtomicU64>,
+    /// Timestamp of first transaction in current window
+    window_start: Arc<AtomicU64>,
+}
+
+/// Rolling window spending tracker
+/// NOTE: In production, this needs persistent storage (Redis/database) to survive restarts
+#[derive(Debug)]
 struct SpendingTracker {
-    /// sender → (day_timestamp, amount_spent_today)
-    daily_spend: HashMap<[u8; 20], (u64, u128)>,
+    /// sender → spending entry with atomic counters
+    /// Uses rolling 24-hour window instead of daily reset
+    spending: HashMap<[u8; 20], SpendingEntry>,
+    /// Rolling window duration in seconds (24 hours)
+    window_duration: u64,
 }
 
 impl SpendingTracker {
     fn new() -> Self {
         Self {
-            daily_spend: HashMap::new(),
+            spending: HashMap::new(),
+            window_duration: 86400, // 24 hours rolling window
         }
     }
 
-    fn current_day() -> u64 {
-        let now = Utc::now().timestamp() as u64;
-        now / 86400
+    fn current_timestamp() -> u64 {
+        Utc::now().timestamp() as u64
     }
 
     fn check_and_record(
@@ -313,18 +327,38 @@ impl SpendingTracker {
         amount: u128,
         limit: u128,
     ) -> Result<(), PaymasterError> {
-        let today = Self::current_day();
-        let entry = self.daily_spend.entry(sender).or_insert((today, 0));
-        if entry.0 != today {
-            *entry = (today, 0);
+        let now = Self::current_timestamp();
+        let amount_u64 = amount.min(u64::MAX as u128) as u64;
+        let limit_u64 = limit.min(u64::MAX as u128) as u64;
+        
+        // Get or create entry with atomic counters
+        let entry = self.spending.entry(sender).or_insert_with(|| SpendingEntry {
+            amount: Arc::new(AtomicU64::new(0)),
+            window_start: Arc::new(AtomicU64::new(now)),
+        });
+
+        let window_start = entry.window_start.load(Ordering::Acquire);
+        
+        // Check if we need to reset the rolling window
+        if now.saturating_sub(window_start) >= self.window_duration {
+            // Reset window atomically
+            entry.window_start.store(now, Ordering::Release);
+            entry.amount.store(0, Ordering::Release);
         }
-        if entry.1.saturating_add(amount) > limit {
+
+        let current_spent = entry.amount.load(Ordering::Acquire);
+        
+        // Check if adding this amount would exceed the limit
+        if current_spent.saturating_add(amount_u64) > limit_u64 {
             return Err(PaymasterError::SpendingLimitExceeded {
-                spent: entry.1,
+                spent: current_spent as u128,
                 limit,
             });
         }
-        entry.1 += amount;
+
+        // Atomically add the amount
+        entry.amount.fetch_add(amount_u64, Ordering::AcqRel);
+        
         Ok(())
     }
 }

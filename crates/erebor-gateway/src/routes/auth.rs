@@ -5,7 +5,8 @@ use axum::{
 };
 use erebor_auth::{
     deterministic_user_id,
-    providers::{SiweMessage, FarcasterMessage, TelegramAuthData, AuthProviderHandler}
+    providers::{SiweMessage, FarcasterMessage, TelegramAuthData, AuthProviderHandler},
+    middleware::TokenBlacklistTrait,
 };
 use erebor_common::{AuthProvider, EreborError, UserId};
 use serde::{Deserialize, Serialize};
@@ -540,12 +541,25 @@ pub async fn refresh(
 
 /// POST /auth/logout — Revoke session
 pub async fn logout(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     RequireAuth(user_id): RequireAuth,
+    headers: axum::http::HeaderMap,
 ) -> ApiResult<Json<MessageResponse>> {
-    // Note: In a production system, we'd revoke the specific session
-    // For now, we just return success as the JWT will expire naturally
-    tracing::info!("User {} logged out", user_id.0);
+    // Extract the JWT token to blacklist it
+    if let Some(auth_header) = headers.get("authorization") {
+        if let Ok(auth_str) = auth_header.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                // Decode the token to extract JTI without verification (we already know it's valid)
+                if let Ok(token_data) = state.jwt.verify(token) {
+                    // Add the JTI to the blacklist
+                    state.token_blacklist.add(token_data.claims.jti).await;
+                    tracing::info!("User {} logged out, token blacklisted", user_id.0);
+                } else {
+                    tracing::warn!("Failed to decode JWT during logout for user {}", user_id.0);
+                }
+            }
+        }
+    }
 
     Ok(Json(MessageResponse {
         message: "Logged out successfully".into(),

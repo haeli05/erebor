@@ -27,3 +27,7 @@ base64 = { workspace = true }
 hmac = "0.12"
 url = "2.4"
 regex = "1.10"
+k256 = { version = "0.13", features = ["ecdsa", "sha2"] }
+sha3 = "0.10"
+rsa = "0.9"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }

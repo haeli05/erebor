@@ -38,11 +38,12 @@ export class IframeController {
 
   private setupMessageListener(): void {
     this.messageListener = (event: MessageEvent) => {
-      // Verify origin for security
-      const vaultOrigin = new URL(this.config.vaultUrl).origin;
-      if (event.origin !== vaultOrigin) {
+      // Explicit origin whitelist validation for security
+      const allowedOrigins = this.config.allowedOrigins || [new URL(this.config.vaultUrl).origin];
+      
+      if (!allowedOrigins.includes(event.origin)) {
         if (this.config.debug) {
-          console.warn('Ignoring message from unauthorized origin:', event.origin);
+          console.warn('Rejecting message from non-whitelisted origin:', event.origin, 'Allowed:', allowedOrigins);
         }
         return;
       }

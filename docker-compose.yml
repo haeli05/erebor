@@ -4,7 +4,7 @@ services:
     build: .
     ports: ["8080:8080"]
     environment:
-      - DATABASE_URL=postgres://erebor:erebor@postgres:5432/erebor
+      - DATABASE_URL=postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379
       - VAULT_MASTER_KEY=${VAULT_MASTER_KEY}
       - JWT_SECRET=${JWT_SECRET}
@@ -13,9 +13,9 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: erebor
-      POSTGRES_PASSWORD: erebor
-      POSTGRES_DB: erebor
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     volumes: [pgdata:/var/lib/postgresql/data]
     ports: ["5432:5432"]
 

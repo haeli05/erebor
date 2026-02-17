@@ -76,6 +76,7 @@ export interface IframeBridgeConfig {
   retryAttempts: number;
   retryDelay: number; // milliseconds
   debug?: boolean;
+  allowedOrigins?: string[]; // Explicit origin whitelist for postMessage security
 }
 
 // Default configuration
@@ -84,12 +85,17 @@ export const DEFAULT_IFRAME_CONFIG: IframeBridgeConfig = {
   timeout: 30000, // 30 seconds
   retryAttempts: 3,
   retryDelay: 1000, // 1 second
-  debug: false
+  debug: false,
+  allowedOrigins: ['https://vault.erebor.xyz'] // Default whitelist - configure for your vault
 };
 
-// Helper to generate unique nonces
+// Helper to generate unique nonces using cryptographically secure random
 export function generateNonce(): string {
-  return Math.random().toString(36).substring(2) + Date.now().toString(36);
+  // Use crypto.getRandomValues() for secure randomness instead of Math.random()
+  const array = new Uint32Array(2);
+  crypto.getRandomValues(array);
+  const randomPart = array[0].toString(36) + array[1].toString(36);
+  return randomPart + Date.now().toString(36);
 }
 
 // Helper to validate message format

@@ -13,6 +13,13 @@ use tracing::warn;
 
 use crate::jwt::{Claims, JwtManager};
 
+/// Trait for token blacklisting (to support logout)
+#[async_trait::async_trait]
+pub trait TokenBlacklistTrait: Send + Sync {
+    async fn is_blacklisted(&self, jti: &str) -> bool;
+    async fn add(&self, jti: String);
+}
+
 /// Authenticated user extracted from JWT
 #[derive(Debug, Clone)]
 pub struct AuthenticatedUser {
@@ -43,6 +50,13 @@ pub async fn auth_middleware(
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let token_data = jwt_manager.verify(token).map_err(|_| StatusCode::UNAUTHORIZED)?;
+
+    // Check if token is blacklisted (optional, for logout support)
+    if let Some(blacklist) = request.extensions().get::<Arc<dyn TokenBlacklistTrait>>() {
+        if blacklist.is_blacklisted(&token_data.claims.jti).await {
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
 
     let user_id = token_data
         .claims

@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use erebor_common::{EreborError, Result, UserId};
-use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, TokenData, Validation};
+use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, TokenData, Validation};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -38,7 +38,9 @@ impl JwtManager {
             jti: uuid::Uuid::new_v4().to_string(),
             providers: providers.to_vec(),
         };
-        encode(&Header::default(), &claims, &self.encoding_key)
+        let mut header = Header::default();
+        header.alg = Algorithm::HS256;
+        encode(&header, &claims, &self.encoding_key)
             .map_err(|e| EreborError::AuthError(format!("JWT encode failed: {e}")))
     }
 
@@ -51,12 +53,15 @@ impl JwtManager {
             jti: uuid::Uuid::new_v4().to_string(),
             providers: vec![],
         };
-        encode(&Header::default(), &claims, &self.encoding_key)
+        let mut header = Header::default();
+        header.alg = Algorithm::HS256;
+        encode(&header, &claims, &self.encoding_key)
             .map_err(|e| EreborError::AuthError(format!("JWT encode failed: {e}")))
     }
 
     pub fn verify(&self, token: &str) -> Result<TokenData<Claims>> {
-        let validation = Validation::default();
+        let mut validation = Validation::default();
+        validation.algorithms = vec![Algorithm::HS256];
         decode::<Claims>(token, &self.decoding_key, &validation)
             .map_err(|e| EreborError::InvalidToken(format!("{e}")))
     }

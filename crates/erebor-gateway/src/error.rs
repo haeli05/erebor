@@ -3,6 +3,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use erebor_common::EreborError;
 use serde_json::json;
+use tracing;
 
 /// Unified API error response that maps EreborError to HTTP responses
 pub struct ApiError(EreborError);
@@ -15,18 +16,22 @@ impl From<EreborError> for ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        // Log internal details for debugging but don't expose to user
+        tracing::error!("API Error: {:?}", self.0);
+        
         let (status, error_message, error_code) = match &self.0 {
-            EreborError::AuthError(_) => (StatusCode::UNAUTHORIZED, self.0.to_string(), "AUTH_ERROR"),
-            EreborError::InvalidToken(_) => (StatusCode::UNAUTHORIZED, self.0.to_string(), "INVALID_TOKEN"),
-            EreborError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".into(), "UNAUTHORIZED"),
-            EreborError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone(), "NOT_FOUND"),
-            EreborError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "Rate limited".into(), "RATE_LIMITED"),
-            EreborError::VaultError(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.0.to_string(), "VAULT_ERROR"),
-            EreborError::ShareError(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.0.to_string(), "SHARE_ERROR"),
-            EreborError::EncryptionError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal encryption error".into(), "ENCRYPTION_ERROR"),
-            EreborError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error".into(), "DATABASE_ERROR"),
-            EreborError::ChainError(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.0.to_string(), "CHAIN_ERROR"),
-            EreborError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".into(), "INTERNAL_ERROR"),
+            // Sanitized error responses - no internal details exposed
+            EreborError::AuthError(_) => (StatusCode::UNAUTHORIZED, "Authentication failed".to_string(), "AUTH_ERROR"),
+            EreborError::InvalidToken(_) => (StatusCode::UNAUTHORIZED, "Invalid or expired token".to_string(), "INVALID_TOKEN"),
+            EreborError::Unauthorized => (StatusCode::UNAUTHORIZED, "Unauthorized".to_string(), "UNAUTHORIZED"),
+            EreborError::NotFound(_) => (StatusCode::NOT_FOUND, "Resource not found".to_string(), "NOT_FOUND"),
+            EreborError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "Rate limit exceeded".to_string(), "RATE_LIMITED"),
+            EreborError::VaultError(_) => (StatusCode::UNPROCESSABLE_ENTITY, "Vault operation failed".to_string(), "VAULT_ERROR"),
+            EreborError::ShareError(_) => (StatusCode::UNPROCESSABLE_ENTITY, "Secret sharing operation failed".to_string(), "SHARE_ERROR"),
+            EreborError::EncryptionError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Encryption operation failed".to_string(), "ENCRYPTION_ERROR"),
+            EreborError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database operation failed".to_string(), "DATABASE_ERROR"),
+            EreborError::ChainError(_) => (StatusCode::UNPROCESSABLE_ENTITY, "Blockchain operation failed".to_string(), "CHAIN_ERROR"),
+            EreborError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error".to_string(), "INTERNAL_ERROR"),
         };
 
         let body = Json(json!({
