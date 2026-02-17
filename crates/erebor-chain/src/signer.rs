@@ -18,7 +18,7 @@ pub enum SignerError {
     UnsupportedTransactionType,
 }
 
-/// A secret bytes wrapper that zeros itself on drop.
+/// A secret bytes wrapper that zeros memory on drop to prevent sensitive data from lingering.
 #[derive(Clone, ZeroizeOnDrop)]
 pub struct SecretBytes {
     bytes: Vec<u8>,
@@ -68,6 +68,7 @@ pub trait TransactionSigner: Send + Sync {
 pub struct EvmSigner;
 
 impl EvmSigner {
+    /// Create a new EVM transaction signer.
     pub fn new() -> Self {
         Self
     }
@@ -277,14 +278,9 @@ impl TransactionSigner for EvmSigner {
         // Extract r, s, and calculate recovery ID
         let (signature_bytes, recovery_id) = {
             let sig_bytes = signature.to_bytes();
-            // Try both recovery IDs to find the correct one
-            let mut recovery_id = 0u8;
-            for rid in 0..=1 {
-                // For now, we'll use the first recovery ID
-                // In production, you'd verify which recovery ID produces the correct public key
-                recovery_id = rid;
-                break;
-            }
+            // Use recovery ID 0 for now
+            // In production, you'd verify which recovery ID produces the correct public key
+            let recovery_id = 0u8;
             (sig_bytes, recovery_id)
         };
 
@@ -313,9 +309,11 @@ impl TransactionSigner for EvmSigner {
 }
 
 /// Solana transaction signer (stub implementation).
+/// Solana transaction signer (stub implementation).
 pub struct SolanaSigner;
 
 impl SolanaSigner {
+    /// Create a new Solana transaction signer.
     pub fn new() -> Self {
         Self
     }

@@ -333,10 +333,10 @@ impl PolicyEngine {
                 ConditionKind::ChainId => serde_json::Value::Number(ctx.chain_id.into()),
                 ConditionKind::TokenAddress => serde_json::Value::String(ctx.to.clone()),
                 ConditionKind::IpAddress => ctx.ip_address.clone()
-                    .map(|ip| serde_json::Value::String(ip))
+                    .map(serde_json::Value::String)
                     .unwrap_or(serde_json::Value::Null),
                 ConditionKind::Country => ctx.country.clone()
-                    .map(|c| serde_json::Value::String(c))
+                    .map(serde_json::Value::String)
                     .unwrap_or(serde_json::Value::Null),
                 ConditionKind::UserId => serde_json::Value::String(ctx.user_id.0.to_string()),
             };

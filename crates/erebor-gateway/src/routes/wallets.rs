@@ -131,7 +131,7 @@ pub async fn get_wallet(
 
     // For MVP, we can't easily retrieve wallet info without recreating it
     // In production, you'd store wallet metadata in a separate store
-    return Err(ApiError::from(EreborError::Internal("Wallet details not implemented".into())));
+    Err(ApiError::from(EreborError::Internal("Wallet details not implemented".into())))
 }
 
 /// POST /wallets/:id/sign-message — Sign arbitrary message
@@ -239,7 +239,7 @@ pub async fn send_transaction(
         .await
         .map_err(ApiError::from)?;
 
-    let tx_hash_hex = hex::encode(&hash_array);
+    let tx_hash_hex = hex::encode(hash_array);
 
     // In production, you'd actually broadcast the transaction here
     tracing::info!("Simulated transaction broadcast for user {}: {}", user_id.0, tx_hash_hex);

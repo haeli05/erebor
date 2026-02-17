@@ -755,6 +755,7 @@ struct GitHubTokenResponse {
 #[derive(Deserialize)]
 struct GitHubUser {
     id: u64,
+    #[allow(dead_code)]
     login: String,
     name: Option<String>,
     email: Option<String>,
@@ -882,6 +883,7 @@ pub struct FarcasterProvider {
     nonces: Arc<RwLock<HashMap<String, Instant>>>,
     expected_domain: String,
     nonce_ttl: Duration,
+    #[allow(dead_code)]
     http: reqwest::Client,
 }
 

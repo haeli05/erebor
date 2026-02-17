@@ -92,9 +92,7 @@ impl EvmBroadcaster {
         pools
             .get(&chain_id)
             .cloned()
-            .ok_or_else(|| {
-                BroadcastError::Rpc(RpcError::NoEndpoints(chain_id))
-            })
+            .ok_or(BroadcastError::Rpc(RpcError::NoEndpoints(chain_id)))
     }
 
     /// Track a pending transaction.

@@ -39,8 +39,8 @@ impl AppState {
         let email_otp = EmailOtpProvider::new();
         let phone_otp = PhoneOtpProvider::new();
         let siwe = SiweProvider::new("erebor.local".into());
-        let farcaster = FarcasterProvider::new("erebor".into(), "http://localhost:8080".into());
-        let telegram = TelegramAuthProvider::new("erebor".into(), "bot-token".into());
+        let farcaster = FarcasterProvider::new("erebor".into());
+        let telegram = TelegramAuthProvider::new("bot-token".into());
         let providers = Arc::new(ProviderRegistry::new(
             email_otp, 
             phone_otp,
@@ -87,8 +87,8 @@ impl AppState {
         let email_otp = EmailOtpProvider::new();
         let phone_otp = PhoneOtpProvider::new();
         let siwe = SiweProvider::new("erebor.local".into());
-        let farcaster = FarcasterProvider::new("erebor".into(), "http://localhost:8080".into());
-        let telegram = TelegramAuthProvider::new("erebor".into(), "bot-token".into());
+        let farcaster = FarcasterProvider::new("erebor".into());
+        let telegram = TelegramAuthProvider::new("bot-token".into());
         let providers = Arc::new(ProviderRegistry::new(
             email_otp, 
             phone_otp,

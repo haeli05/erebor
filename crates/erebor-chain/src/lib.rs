@@ -163,6 +163,7 @@ impl ChainService {
     }
 
     /// Sync nonce manager with chain state for an address.
+    #[allow(clippy::await_holding_lock)] // TODO: Use tokio::sync::RwLock for async compatibility
     pub async fn sync_nonce(
         &self,
         chain_id: u64,

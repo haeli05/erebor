@@ -86,12 +86,12 @@ impl ShamirVault {
 
         let mut secret = vec![0u8; len];
 
-        for byte_idx in 0..len {
+        for (byte_idx, secret_byte) in secret.iter_mut().enumerate().take(len) {
             let points: Vec<(u8, u8)> = shares
                 .iter()
                 .map(|s| (s.index, s.data[byte_idx]))
                 .collect();
-            secret[byte_idx] = gf256_interpolate(&points);
+            *secret_byte = gf256_interpolate(&points);
         }
 
         Ok(SecretBytes(secret))

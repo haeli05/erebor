@@ -48,7 +48,7 @@ pub type ApiResult<T> = Result<T, ApiError>;
 #[macro_export]
 macro_rules! api_error {
     ($err:expr) => {
-        crate::error::ApiError::from($err)
+        $crate::error::ApiError::from($err)
     };
 }
 
