@@ -1,9 +1,9 @@
-use chrono::{Duration, Utc};
+use chrono::{Duration, Timelike, Utc};
 use erebor_common::UserId;
 use uuid::Uuid;
 
 use crate::{
-    aggregation::{Aggregation, AggregationMetric, TransactionEvent},
+    aggregation::{Aggregation, AggregationMetric},
     condition::{ConditionKind, ConditionLogic, ConditionOperator, ConditionSet},
     engine::{PolicyEngine, TransactionContext},
     quorum::{KeyQuorum, QuorumRole},
@@ -339,10 +339,10 @@ fn test_rule_priority_ordering() {
     let mut engine = PolicyEngine::new();
     let ctx = create_test_context();
     
-    // Add high priority allow rule
+    // Add high priority allow rule (using a low limit to ensure it triggers)
     let allow_rule = Rule::new(
         "Allow Rule".to_string(),
-        RuleKind::MaxTransactionValue { max_wei: u128::MAX },
+        RuleKind::MaxTransactionValue { max_wei: 500_000_000_000_000_000 }, // 0.5 ETH - will trigger for 1 ETH
         RuleAction::Allow,
         1, // Higher priority (lower number)
     );
@@ -572,7 +572,7 @@ fn test_aggregation_recording() {
         updated_at: Utc::now(),
     };
     
-    engine.aggregations.add_aggregation(aggregation.clone());
+    engine.aggregations_mut().add_aggregation(aggregation.clone());
     
     // Record some transactions
     engine.evaluate(&ctx);
@@ -581,7 +581,7 @@ fn test_aggregation_recording() {
     
     // Query the aggregation
     let group_key = ctx.user_id.0.to_string();
-    let count = engine.aggregations.query(&aggregation.id, &group_key);
+    let count = engine.aggregations().query(&aggregation.id, &group_key);
     assert_eq!(count, 3);
 }
 

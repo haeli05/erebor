@@ -92,7 +92,7 @@ impl PolicyEngine {
 
             if self.evaluate_rule(rule, ctx) {
                 match &rule.action {
-                    RuleAction::Allow => continue,
+                    RuleAction::Allow => return PolicyDecision::Allow,
                     RuleAction::Deny { reason } => {
                         return PolicyDecision::Deny {
                             rule_id: rule.id,
@@ -133,9 +133,9 @@ impl PolicyEngine {
     /// Evaluate a single rule against the transaction context
     fn evaluate_rule(&self, rule: &Rule, ctx: &TransactionContext) -> bool {
         match &rule.kind {
-            RuleKind::SpendingLimit { max_amount, period, currency: _ } => {
+            RuleKind::SpendingLimit { max_amount, period: _, currency: _ } => {
                 // For simplicity, using user_id as group key
-                let group_key = ctx.user_id.0.to_string();
+                let _group_key = ctx.user_id.0.to_string();
                 
                 // Check if there's a spending limit aggregation
                 // In a real implementation, we'd need to create aggregations dynamically
@@ -174,7 +174,7 @@ impl PolicyEngine {
                 // Always trigger for multi-sig rules - approval logic handles threshold
                 true
             }
-            RuleKind::RateLimit { max_transactions, period: _ } => {
+            RuleKind::RateLimit { max_transactions: _, period: _ } => {
                 // Simplified rate limiting - would need proper aggregation
                 // For now, just allow
                 false
@@ -301,6 +301,16 @@ impl PolicyEngine {
     /// Clean up expired approval requests
     pub fn cleanup_expired_approvals(&mut self) {
         self.approval_store.cleanup_expired();
+    }
+
+    /// Get a reference to the aggregation store
+    pub fn aggregations(&self) -> &AggregationStore {
+        &self.aggregations
+    }
+
+    /// Get a mutable reference to the aggregation store
+    pub fn aggregations_mut(&mut self) -> &mut AggregationStore {
+        &mut self.aggregations
     }
 
     /// Evaluate a condition set against transaction context
