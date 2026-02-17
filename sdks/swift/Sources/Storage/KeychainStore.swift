@@ -74,7 +74,7 @@ public class KeychainStore {
     ///   - data: Data to save
     ///   - key: Keychain item key
     ///   - accessControl: Optional access control (for biometric protection)
-    private func save(data: Data, key: String, accessControl: SecAccessControl? = nil) throws {
+    func save(data: Data, key: String, accessControl: SecAccessControl? = nil) throws {
         // Delete existing item first
         try? delete(key: key)
         
@@ -107,7 +107,7 @@ public class KeychainStore {
     /// Load data from keychain
     /// - Parameter key: Keychain item key
     /// - Returns: Stored data
-    private func load(key: String) throws -> Data {
+    func load(key: String) throws -> Data {
         var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: serviceIdentifier,
