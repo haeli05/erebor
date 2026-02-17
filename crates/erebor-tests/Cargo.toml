@@ -1,0 +1,26 @@
+[package]
+name = "erebor-tests"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+erebor-common = { path = "../erebor-common" }
+erebor-vault = { path = "../erebor-vault" }
+erebor-auth = { path = "../erebor-auth" }
+rand = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+jsonwebtoken = { workspace = true }
+
+[[test]]
+name = "crypto_tests"
+path = "tests/crypto_tests.rs"
+
+[[test]]
+name = "security_tests"
+path = "tests/security_tests.rs"
+
+[[test]]
+name = "integration_tests"
+path = "tests/integration_tests.rs"

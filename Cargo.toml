@@ -6,6 +6,7 @@ members = [
     "crates/erebor-chain",
     "crates/erebor-gateway",
     "crates/erebor-common",
+    "crates/erebor-tests",
 ]
 resolver = "2"
 
@@ -58,3 +59,5 @@ dotenvy = "0.15"
 vsss-rs = "4"
 # Config
 config = "0.14"
+# Force compatible versions
+getrandom = "0.2"

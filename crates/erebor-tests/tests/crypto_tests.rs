@@ -8,10 +8,9 @@ use std::collections::HashSet;
 fn combinations(shares: &[Share], t: usize) -> Vec<Vec<Share>> {
     let n = shares.len();
     let mut result = Vec::new();
-    let mut indices = (0..t).collect::<Vec<_>>();
+    let mut indices: Vec<usize> = (0..t).collect();
     loop {
         result.push(indices.iter().map(|&i| shares[i].clone()).collect());
-        // Next combination
         let mut i = t;
         while i > 0 {
             i -= 1;
@@ -75,14 +74,27 @@ fn shamir_all_combinations_reconstruct_3_of_5() {
 }
 
 #[test]
+fn shamir_all_combinations_reconstruct_4_of_7() {
+    let vault = ShamirVault::new(4, 7).unwrap();
+    let secret = b"four-of-seven-test!!!!!!!!!!!!!!";
+    let shares = vault.split(secret).unwrap();
+
+    let combos = combinations(&shares, 4);
+    assert_eq!(combos.len(), 35); // C(7,4) = 35
+    for combo in &combos {
+        let recovered = vault.reconstruct(combo).unwrap();
+        assert_eq!(&recovered.0, secret);
+    }
+}
+
+#[test]
 fn shamir_t_minus_1_shares_reveal_nothing() {
-    // Statistical test: with t=2, a single share should reveal no information about the secret.
-    // For each byte position, across many splits of the same secret, the share byte values
-    // should be approximately uniformly distributed over GF(256).
+    // Statistical test: with t=2, a single share should reveal no information.
+    // For each byte position, share values should be approximately uniform over GF(256).
     let vault = ShamirVault::new(2, 3).unwrap();
-    let secret = vec![0xAA; 4]; // fixed secret
+    let secret = vec![0xAA; 4];
     let trials = 1000;
-    let mut byte_counts = vec![[0u32; 256]; 4]; // per byte position
+    let mut byte_counts = vec![[0u32; 256]; 4];
 
     for _ in 0..trials {
         let shares = vault.split(&secret).unwrap();
@@ -91,8 +103,7 @@ fn shamir_t_minus_1_shares_reveal_nothing() {
         }
     }
 
-    // Chi-squared test: expected = trials/256 ≈ 3.9
-    // For uniform distribution, chi-squared should be < ~300 (df=255, p=0.05 → ~293)
+    // Chi-squared test: for uniform distribution over 256 values with 1000 trials
     for (pos, counts) in byte_counts.iter().enumerate() {
         let expected = trials as f64 / 256.0;
         let chi_sq: f64 = counts
@@ -102,6 +113,7 @@ fn shamir_t_minus_1_shares_reveal_nothing() {
                 diff * diff / expected
             })
             .sum();
+        // df=255, p=0.01 critical value ~310. Use 350 for margin.
         assert!(
             chi_sq < 350.0,
             "Byte position {pos}: chi-squared {chi_sq} too high, share may leak information"
@@ -128,11 +140,10 @@ fn encryption_tampered_ciphertext_fails() {
     let ctx = b"user:tamper-test";
     let (mut ct, nonce) = svc.encrypt(b"hello world", ctx).unwrap();
 
-    // Tamper each byte position
     for i in 0..ct.len() {
         ct[i] ^= 0xFF;
-        assert!(svc.decrypt(&ct, &nonce, ctx).is_err());
-        ct[i] ^= 0xFF; // restore
+        assert!(svc.decrypt(&ct, &nonce, ctx).is_err(), "Tamper at byte {i} not detected");
+        ct[i] ^= 0xFF;
     }
 }
 

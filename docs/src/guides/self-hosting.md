@@ -1,208 +1,181 @@
 # Self-Hosting Guide
 
-This guide covers deploying Erebor in production.
+Erebor is designed to be self-hosted. This guide covers deploying to your own infrastructure.
 
-## Docker Compose (Simple)
+## Minimum Requirements
 
-```yaml
-version: '3.8'
-services:
-  gateway:
-    image: erebor:latest
-    build: .
-    ports: ["8080:8080"]
-    depends_on: [postgres, redis]
-    environment:
-      RUST_LOG: info
-      JWT_SECRET: ${JWT_SECRET}
-      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY}
-      DATABASE_URL: postgres://erebor:${DB_PASSWORD}@postgres:5432/erebor
-      REDIS_URL: redis://redis:6379
-      SIWE_DOMAIN: ${SIWE_DOMAIN:-localhost}
-      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
-      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI:-}
-    restart: unless-stopped
+| Component | Dev | Production |
+|-----------|-----|-----------|
+| CPU | 1 core | 2+ cores |
+| RAM | 512 MB | 2+ GB |
+| Disk | 1 GB | 20+ GB (PostgreSQL data) |
+| OS | Linux, macOS | Linux (Debian/Ubuntu recommended) |
 
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: erebor
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: erebor
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
+## Architecture Options
 
-  redis:
-    image: redis:7-alpine
-    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
-    restart: unless-stopped
+### Single Server (Simple)
 
-volumes:
-  pgdata:
+Everything on one machine via Docker Compose:
+
+```
+┌──────────────────────────────┐
+│         Single Server        │
+│                              │
+│  ┌────────┐  ┌──────────┐   │
+│  │Gateway │  │PostgreSQL│   │
+│  └────────┘  └──────────┘   │
+│  ┌────────┐  ┌──────────┐   │
+│  │ Caddy  │  │  Redis   │   │
+│  │ (TLS)  │  │          │   │
+│  └────────┘  └──────────┘   │
+└──────────────────────────────┘
 ```
 
-### Deploy
+Good for: startups, small teams, <10k users.
+
+### Multi-Service (Scalable)
+
+Each module as a separate deployment:
+
+```
+┌──────────┐     ┌──────────┐     ┌──────────┐
+│  Auth    │     │  Vault   │     │  Chain   │
+│ (2 pods) │     │ (1 pod)  │     │ (2 pods) │
+└────┬─────┘     └────┬─────┘     └────┬─────┘
+     │                │                │
+     └────────────────┼────────────────┘
+                      │
+              ┌───────▼───────┐
+              │   PostgreSQL  │
+              │   (managed)   │
+              └───────────────┘
+```
+
+- Auth: scale horizontally (stateless after JWT issuance)
+- Vault: scale carefully (stateful, encrypted storage)
+- Chain: scale per chain traffic
+
+## Step-by-Step Deployment
+
+### 1. Provision a Server
 
 ```bash
-# Generate secrets
-export JWT_SECRET=$(openssl rand -hex 32)
-export VAULT_MASTER_KEY=$(openssl rand -hex 32)
-export DB_PASSWORD=$(openssl rand -hex 16)
-export SIWE_DOMAIN=yourdomain.com
-
-# Save secrets securely
-echo "JWT_SECRET=$JWT_SECRET" >> .env.production
-echo "VAULT_MASTER_KEY=$VAULT_MASTER_KEY" >> .env.production
-echo "DB_PASSWORD=$DB_PASSWORD" >> .env.production
-
-# Start
-docker compose --env-file .env.production up -d
+# Ubuntu 22.04+ recommended
+sudo apt update && sudo apt upgrade -y
+sudo apt install -y docker.io docker-compose-v2 git
+sudo systemctl enable docker
 ```
 
-## Reverse Proxy (Nginx)
+### 2. Clone and Configure
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name api.yourdomain.com;
+```bash
+git clone https://github.com/haeli05/erebor.git
+cd erebor
 
-    ssl_certificate     /etc/letsencrypt/live/api.yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/api.yourdomain.com/privkey.pem;
+# Generate secrets
+mkdir -p secrets
+openssl rand -hex 32 > secrets/vault_key
+openssl rand -base64 32 > secrets/jwt_secret
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
+# Create .env
+cat > .env << EOF
+RUST_LOG=info
+JWT_SECRET=$(cat secrets/jwt_secret)
+VAULT_MASTER_KEY=$(cat secrets/vault_key)
+SIWE_DOMAIN=yourdomain.com
+DB_PASSWORD=$(openssl rand -base64 24)
+EOF
+```
 
-        # Rate limiting headers for Erebor
-        proxy_pass_header X-Real-IP;
-    }
+### 3. Start Services
 
-    # Health check (no auth)
-    location /health {
-        proxy_pass http://127.0.0.1:8080/health;
+```bash
+docker compose up -d
+```
+
+### 4. Set Up TLS
+
+Using Caddy (automatic HTTPS):
+
+```bash
+# Install Caddy
+sudo apt install -y caddy
+
+# Configure
+cat > /etc/caddy/Caddyfile << EOF
+erebor.yourdomain.com {
+    reverse_proxy localhost:8080
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
     }
 }
+EOF
+
+sudo systemctl restart caddy
 ```
 
-## Kubernetes (Helm)
+### 5. Verify
 
-Basic deployment manifest:
-
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: erebor-gateway
-spec:
-  replicas: 3
-  selector:
-    matchLabels:
-      app: erebor-gateway
-  template:
-    metadata:
-      labels:
-        app: erebor-gateway
-    spec:
-      containers:
-      - name: gateway
-        image: erebor:latest
-        ports:
-        - containerPort: 8080
-        env:
-        - name: JWT_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: erebor-secrets
-              key: jwt-secret
-        - name: VAULT_MASTER_KEY
-          valueFrom:
-            secretKeyRef:
-              name: erebor-secrets
-              key: vault-master-key
-        - name: DATABASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: erebor-secrets
-              key: database-url
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          periodSeconds: 30
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 8080
-          periodSeconds: 10
-        resources:
-          requests:
-            memory: "128Mi"
-            cpu: "100m"
-          limits:
-            memory: "512Mi"
-            cpu: "500m"
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: erebor-gateway
-spec:
-  selector:
-    app: erebor-gateway
-  ports:
-  - port: 80
-    targetPort: 8080
-  type: ClusterIP
+```bash
+curl https://erebor.yourdomain.com/health
+# {"status":"ok","version":"0.1.0"}
 ```
-
-## Scaling Considerations
-
-| Service | Scaling | Notes |
-|---------|---------|-------|
-| Gateway | Horizontal | Stateless — scale freely behind a load balancer |
-| Auth | Horizontal | Stateless after JWT issuance (sessions in Redis) |
-| Vault | Careful | Stateful — encrypted storage must be consistent |
-| PostgreSQL | Vertical / Read replicas | ACID required for key metadata |
-| Redis | Cluster | Sessions, nonces, rate limits |
 
 ## Backup Strategy
 
-### Critical Data
-
-1. **`VAULT_MASTER_KEY`** — Without this, all encrypted shares are unrecoverable. Store in multiple secure locations (HSM, sealed envelope, etc.)
-2. **PostgreSQL** — Contains user data and encrypted key shares
+### Database Backup
 
 ```bash
-# Database backup
-pg_dump -h localhost -U erebor erebor | gzip > erebor_backup_$(date +%Y%m%d).sql.gz
+# Daily PostgreSQL backup
+pg_dump -h localhost -U erebor erebor | gzip > backup-$(date +%Y%m%d).sql.gz
 
-# Verify backup
-gunzip -c erebor_backup_*.sql.gz | head -20
+# Automate with cron
+echo "0 3 * * * pg_dump -h localhost -U erebor erebor | gzip > /backups/erebor-\$(date +\%Y\%m\%d).sql.gz" | crontab -
 ```
 
-### What NOT to Back Up
+### Key Material Backup
 
-- Redis — ephemeral data (sessions, nonces). Lost Redis = users re-authenticate.
-- Logs — useful but not critical for recovery.
+The master encryption key (`VAULT_MASTER_KEY`) is the most critical secret. If lost, encrypted shares cannot be decrypted.
+
+- Store in a KMS (AWS KMS, GCP KMS) for production
+- Keep an offline backup in a secure location (hardware security module, safe deposit box)
+- The master key + database backup = full recovery capability
+
+### Recovery Procedure
+
+1. Restore PostgreSQL from backup
+2. Configure `VAULT_MASTER_KEY` (from KMS or offline backup)
+3. Start Erebor services
+4. Verify: encrypted shares decrypt correctly, wallets are accessible
 
 ## Monitoring
 
 ### Health Check
 
 ```bash
-# Simple uptime check
-curl -sf http://localhost:8080/health || alert "Erebor is down"
+# Simple cron health check
+*/5 * * * * curl -sf http://localhost:8080/health || echo "Erebor down" | mail -s "Alert" admin@example.com
 ```
 
-### Recommended Metrics
+### Metrics to Watch
 
-- Request latency (p50, p95, p99) per endpoint
-- Error rate by status code
-- Active sessions count
+- API response times (p50, p95, p99)
+- Error rates by endpoint
+- Rate limiter triggers
+- Authentication success/failure ratio
 - Key operations per minute (signing, rotation)
-- Rate limiter rejections
+- Database connection pool usage
+- Memory usage (watch for leaks)
+
+## Updating
+
+```bash
+cd erebor
+git pull
+docker compose build
+docker compose up -d
+```
+
+For zero-downtime updates, use rolling deployment with a load balancer in front of multiple gateway instances.

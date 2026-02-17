@@ -1,129 +1,66 @@
 # Contributing to Erebor
 
-Thank you for your interest in contributing to Erebor! This project aims to provide open-source, self-custodial wallet infrastructure that anyone can run. Every contribution matters.
+Thank you for your interest in contributing to Erebor! We welcome contributions of all kinds — bug fixes, features, documentation, and security improvements.
 
 ## Quick Start
 
 ```bash
-# Fork and clone
-git clone https://github.com/<your-username>/erebor.git
+git clone https://github.com/haeli05/erebor.git
 cd erebor
-
-# Build
-cargo build
-
-# Run tests
-cargo test
-
-# Run with logging
-RUST_LOG=debug cargo run -p erebor-gateway
-```
-
-## Development Setup
-
-### Prerequisites
-
-- **Rust 1.75+** — Install via [rustup](https://rustup.rs/)
-- **PostgreSQL 16** — For user/session storage (optional for unit tests)
-- **Redis 7** — For caching/rate limiting (optional for unit tests)
-- **Docker & Docker Compose** — For integration tests and local development
-
-### Project Structure
-
-```
-erebor/
-├── crates/
-│   ├── erebor-common/     # Shared types, errors
-│   ├── erebor-auth/       # Authentication (OAuth, OTP, SIWE, Passkey)
-│   ├── erebor-vault/      # Key management (Shamir, encryption, HD derivation)
-│   ├── erebor-aa/         # Account abstraction (ERC-4337) [WIP]
-│   ├── erebor-chain/      # Multi-chain RPC management [WIP]
-│   └── erebor-gateway/    # API gateway (axum)
-├── tests/                 # Integration tests
-├── docs/                  # mdBook documentation site
-└── contracts/             # Solidity smart contracts [planned]
+cargo build --workspace
+cargo test --workspace
 ```
 
 ## How to Contribute
 
-### Reporting Bugs
-
-1. Check [existing issues](https://github.com/haeli05/erebor/issues) first
-2. Use the bug report template
-3. Include: Rust version, OS, steps to reproduce, expected vs actual behavior
-
-### Suggesting Features
-
-1. Open a [discussion](https://github.com/haeli05/erebor/discussions) first for larger features
-2. For smaller improvements, open an issue with the `enhancement` label
-
-### Submitting Code
-
 1. **Fork** the repository
-2. **Branch** from `main`: `git checkout -b feat/your-feature` or `fix/your-fix`
-3. **Write tests** — All new code must have tests. We aim for >80% coverage on security-critical paths.
-4. **Run the full test suite:** `cargo test --workspace`
-5. **Format and lint:**
-   ```bash
-   cargo fmt --check
-   cargo clippy -- -D warnings
-   ```
-6. **Commit** with conventional commits:
-   - `feat: add passkey authentication`
-   - `fix: prevent share reconstruction with invalid indices`
-   - `docs: update key vault architecture guide`
-   - `test: add edge cases for Shamir splitting`
-   - `refactor: extract GF(256) arithmetic to module`
-7. **Push** and open a **Pull Request** against `main`
-
-### PR Guidelines
-
-- Keep PRs focused — one feature or fix per PR
-- Update documentation if behavior changes
-- Add entries to CHANGELOG.md for user-facing changes
-- Security-sensitive changes require review from a maintainer
-- All CI checks must pass
+2. **Branch** from `main`: `git checkout -b feat/your-feature`
+3. **Code** your changes
+4. **Test**: `cargo test --workspace`
+5. **Lint**: `cargo fmt --all && cargo clippy --workspace -- -D warnings`
+6. **Commit** with a [conventional commit](https://www.conventionalcommits.org/) message
+7. **Push** and open a pull request
 
 ## Code Standards
 
-### Rust Style
+- All code must pass `cargo fmt --check` and `cargo clippy -- -D warnings`
+- New code must include tests
+- Public APIs must have documentation comments
+- Security-sensitive code (vault, encryption) requires extra scrutiny — see below
 
-- Follow standard Rust idioms and the [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/)
-- Use `thiserror` for library errors, `anyhow` only in binaries
-- All public items must have doc comments
-- Unsafe code requires a `// SAFETY:` comment explaining the invariant
+## Security-Sensitive Contributions
 
-### Security Requirements
+Erebor handles private key material. If your change touches `erebor-vault`, `erebor-auth`, or any cryptographic code:
 
-- **All secret types must implement `Zeroize`** — Use `zeroize` crate with `#[zeroize(drop)]`
-- **No logging of key material** — Never log private keys, shares, seeds, or any cryptographic secrets
-- **Constant-time comparisons** for any security-sensitive equality checks
-- **Input validation** at API boundaries — don't trust the client
-- **Rate limiting** on all authentication and signing endpoints
+- Use `SecretBytes` for all secret data (auto-zeroes on drop)
+- Never log or debug-print key material
+- Test failure cases (wrong keys, tampered data, expired tokens)
+- Run `cargo audit` before submitting
 
-### Testing
+See the full [Security Policy](SECURITY.md) for vulnerability reporting.
 
-- Unit tests live alongside the code (`#[cfg(test)]` modules)
-- Integration tests go in `tests/`
-- Use `#[tokio::test]` for async tests
-- Test both success paths and error cases
-- Security-critical code needs adversarial test cases (e.g., tampered ciphertext, expired tokens, replayed nonces)
+## Commit Messages
 
-## Architecture Decisions
+```
+feat: add passkey authentication provider
+fix: handle expired SIWE nonces correctly
+docs: update key vault architecture docs
+test: add BIP-32 test vector 2
+refactor: extract GF(256) arithmetic
+chore: update dependencies
+```
 
-Major architecture decisions are documented in the `docs/` site. If you're proposing a significant change:
+## Project Structure
 
-1. Write up the problem and proposed solution
-2. Open a discussion or RFC issue
-3. Get feedback before writing code
+| Crate | Description |
+|-------|-------------|
+| `erebor-common` | Shared types, errors, `SecretBytes` |
+| `erebor-auth` | OAuth, Email OTP, SIWE, JWT, sessions |
+| `erebor-vault` | Shamir SSS, AES-256-GCM, BIP-32/44, signing |
+| `erebor-aa` | ERC-4337 account abstraction |
+| `erebor-chain` | Multi-chain RPC, gas estimation |
+| `erebor-gateway` | axum API gateway |
 
-## Community
+## Questions?
 
-- Be respectful and constructive
-- Follow the [Rust Code of Conduct](https://www.rust-lang.org/policies/code-of-conduct)
-- Help others in issues and discussions
-- Credit prior art and related work
-
-## License
-
-By contributing, you agree that your contributions will be licensed under the MIT License.
+Open a [GitHub issue](https://github.com/haeli05/erebor/issues) or start a discussion.

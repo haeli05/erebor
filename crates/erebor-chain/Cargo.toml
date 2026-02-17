@@ -16,6 +16,10 @@ uuid = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 url = "2"
+rlp = "0.5"
+tiny-keccak = { version = "2", features = ["keccak"] }
+k256 = "0.13"
+zeroize = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
