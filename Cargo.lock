@@ -595,12 +595,18 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 name = "erebor-aa"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "erebor-common",
+ "hex",
+ "k256",
+ "rand 0.8.5",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -624,6 +630,7 @@ dependencies = [
  "sqlx",
  "thiserror 1.0.69",
  "tokio",
+ "tower 0.5.3",
  "tracing",
  "uuid",
 ]
@@ -632,13 +639,18 @@ dependencies = [
 name = "erebor-chain"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "erebor-common",
+ "hex",
+ "rand 0.8.5",
  "reqwest",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
  "tokio",
  "tracing",
+ "url",
+ "uuid",
 ]
 
 [[package]]

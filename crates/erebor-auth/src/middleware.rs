@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use axum::body::Body;
 use axum::extract::Request;
@@ -137,7 +137,7 @@ mod tests {
     use axum::middleware;
     use axum::routing::get;
     use axum::Router;
-    use tower::ServiceExt;
+    use tower::util::ServiceExt;
 
     fn test_jwt_manager() -> Arc<JwtManager> {
         Arc::new(JwtManager::new(b"test-secret-key-at-least-32-bytes!"))

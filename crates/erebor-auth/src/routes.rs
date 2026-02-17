@@ -7,9 +7,8 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use erebor_common::AuthProvider;
 use serde::{Deserialize, Serialize};
-use tracing::error;
-
 use crate::jwt::JwtManager;
+use crate::providers::AuthProviderHandler;
 use crate::linking::LinkingManager;
 use crate::middleware::AuthenticatedUser;
 use crate::providers::{ProviderRegistry, SiweMessage};
@@ -66,7 +65,7 @@ pub struct LinkRequest {
     pub email: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct AuthResponse {
     pub access_token: String,
     pub refresh_token: String,
@@ -363,7 +362,7 @@ mod tests {
     use crate::session::{InMemorySessionStore, SessionManager};
     use axum::body::Body;
     use axum::http::Request;
-    use tower::ServiceExt;
+    use tower::util::ServiceExt;
 
     fn test_state() -> AuthState {
         let jwt = Arc::new(JwtManager::new(b"test-secret-key-at-least-32-bytes!"));

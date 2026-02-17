@@ -1,0 +1,16 @@
+[book]
+authors = ["Erebor Contributors"]
+language = "en"
+multilingual = false
+src = "src"
+title = "Erebor Documentation"
+description = "Self-custodial wallet infrastructure — auth, embedded wallets, and account abstraction in one stack you own."
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/haeli05/erebor"
+edit-url-template = "https://github.com/haeli05/erebor/edit/main/docs/{path}"
