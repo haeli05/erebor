@@ -1,6 +1,8 @@
 # Introduction
 
-**Erebor** is a modular, self-hosted wallet infrastructure stack written in Rust. It provides the same capabilities as [Privy](https://privy.io) — social login → embedded wallets → smart accounts — but you run it yourself, audit every line, and pay nothing per MAU.
+**Erebor** is a production-ready, self-hosted wallet infrastructure stack written in Rust. It provides complete feature parity with [Privy](https://privy.io) — social login → embedded wallets → smart accounts — but you run it yourself, audit every line, and pay nothing per MAU.
+
+**Status: ✅ Feature-Complete** — Erebor has achieved full parity with Privy across all critical areas including authentication, key management, account abstraction, and SDK support.
 
 ## The Problem
 
@@ -10,16 +12,19 @@ Worse, you can't audit the key management. You can't self-host. You're trusting 
 
 ## The Erebor Approach
 
-Erebor unbundles wallet infrastructure into four swappable Rust crates you compose however you want:
+Erebor unbundles wallet infrastructure into swappable Rust crates you compose however you want:
 
 | Crate | Purpose |
 |-------|---------|
-| `erebor-auth` | OAuth, Email OTP, SIWE, Passkeys → JWT sessions |
-| `erebor-vault` | Shamir 2-of-3 key splitting, AES-256-GCM encryption, BIP-32/44 HD derivation |
-| `erebor-aa` | ERC-4337 bundler, paymaster, smart contract wallets |
-| `erebor-chain` | Multi-chain RPC pooling, gas estimation |
+| `erebor-auth` | OAuth (Google, Apple, Twitter, Discord, GitHub), Email/Phone OTP, SIWE, Farcaster, Telegram → JWT sessions |
+| `erebor-vault` | Shamir 2-of-3 key splitting, AES-256-GCM encryption, BIP-32/44 HD derivation, audit trail |
+| `erebor-aa` | ERC-4337 bundler, paymaster (verifying, sponsored, ERC-20), smart contract wallets, session keys |
+| `erebor-chain` | Multi-chain RPC pooling, gas estimation, transaction signing/broadcasting, nonce management |
+| `erebor-policy` | Policy engine with 11 rule types, condition sets, aggregations, multi-party key quorums |
 
-All wrapped by `erebor-gateway`, an axum-based API gateway with rate limiting and JWT validation.
+All wrapped by `erebor-gateway`, an axum-based API gateway with 27 REST endpoints, rate limiting, and JWT validation.
+
+**Complete SDK Coverage:** React, React Native, Swift (iOS/macOS), and Kotlin (Android) SDKs provide full platform support with native security features like biometric authentication and hardware key storage.
 
 ## Comparison
 

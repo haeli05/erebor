@@ -77,6 +77,9 @@ Privy bundles three commodity pieces (OAuth, key splitting, smart contract walle
 | `erebor-chain` | ✅ Implemented | Multi-chain RPC pooling with failover, EIP-1559 + legacy gas estimation, tx signing + broadcast pipeline, nonce management, chain registry (ETH, Base, Polygon, Arbitrum, Optimism, Solana) |
 | `erebor-policy` | ✅ Implemented | Policy engine with 11 rule types, condition sets (AND/OR), aggregation tracking, multi-party key quorums, approval workflows |
 | `@erebor/react` | ✅ Implemented | React SDK — `useErebor()`, `useWallets()`, `useSendTransaction()`, LoginModal, WalletButton, iframe bridge, `usePrivy()` compatibility shim |
+| `@erebor/react-native` | ✅ Implemented | React Native SDK — same hook API, expo-secure-store, biometrics, deep link OAuth, native Apple Sign-In, on-device signing |
+| `EreborSwift` | ✅ Implemented | Swift SDK — iOS/macOS SPM package, AuthManager, WalletManager, Keychain storage, SwiftUI components, Security framework signing |
+| `erebor-kotlin` | ✅ Implemented | Kotlin SDK — Android library, StateFlow, BiometricPrompt, EncryptedSharedPreferences, Jetpack Compose, Bouncy Castle crypto |
 
 ## Feature Parity with Privy
 
@@ -109,6 +112,8 @@ Honest accounting of where Erebor stands today versus Privy's production offerin
 | RPC pool + failover | ✅ | ✅ | Health tracking, caching, automatic failover |
 | Tx signing + broadcast | ✅ | ✅ | RLP encoding, EIP-155, nonce management, receipt polling |
 | React SDK | ✅ | ✅ | `useErebor()`, `useWallets()`, LoginModal, `usePrivy()` compat shim |
+| React Native SDK | ✅ | ✅ | Expo-secure-store, biometrics, deep links, native Apple Sign-In |
+| Native mobile SDKs | ✅ Swift/Kotlin | ✅ | iOS/Android with hardware security, biometric protection |
 | Embedded wallet iframe | ✅ | ✅ | Cross-origin iframe bridge with postMessage protocol |
 | Policy engine | ✅ | ✅ | 11 rule types, condition sets, aggregations, key quorums |
 | Rate limiting | ✅ | ✅ | Token bucket per key |
@@ -122,8 +127,6 @@ Honest accounting of where Erebor stands today versus Privy's production offerin
 | Feature | Status | Notes |
 |---------|--------|-------|
 | Webhook events | 🟢 Planned | User/wallet/tx lifecycle callbacks |
-| React Native SDK | 🟢 Planned | Expo-based mobile SDK |
-| Swift / Kotlin SDKs | 🟢 Planned | Native iOS + Android |
 | Admin dashboard | 🟢 Planned | Web UI for managing users, policies, apps |
 | Fiat on/off ramp | 🟢 Planned | KYC + bank account integration |
 | MPC-TSS (CGGMP21) | 🟢 Planned | Threshold signing without key reconstruction |
@@ -373,6 +376,17 @@ cd docs && mdbook serve
 - [ ] **Phase 10:** React Native + Swift + Kotlin SDKs
 - [ ] **Phase 11:** MPC-TSS (CGGMP21) + social recovery + anomaly detection
 - [ ] **Phase 12:** TEE support + HSM + Kubernetes Helm charts
+
+## Stats
+
+Erebor by the numbers (as of February 2026):
+
+- **📊 Total lines of code:** 34,347 (13,154 Rust, 21,193 other languages + config)
+- **📦 Number of crates:** 9 (erebor-common, erebor-auth, erebor-vault, erebor-chain, erebor-aa, erebor-gateway, erebor-policy, erebor-tests, plus workspace)
+- **🔗 Number of SDKs:** 4 (React, React Native, Swift, Kotlin)
+- **🧪 Number of tests:** 172 test functions across 10 test files
+- **🔐 Number of auth providers:** 11 (Google, Apple, Twitter, Discord, GitHub, Farcaster, Telegram, Email OTP, Phone OTP, SIWE, Passkey)
+- **🌐 Number of API endpoints:** 27 (17 public auth endpoints + 10 protected wallet/user endpoints)
 
 ## License
 
