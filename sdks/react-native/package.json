@@ -1,0 +1,49 @@
+{
+  "name": "@erebor/react-native",
+  "version": "0.1.0",
+  "description": "React Native SDK for Erebor — self-custodial wallet infrastructure on mobile",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsup src/index.ts --format cjs,esm --dts",
+    "dev": "tsup src/index.ts --format cjs,esm --dts --watch"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-native": ">=0.72.0",
+    "expo-secure-store": ">=13.0.0",
+    "expo-web-browser": ">=13.0.0",
+    "expo-crypto": ">=13.0.0",
+    "@react-native-async-storage/async-storage": ">=1.19.0",
+    "@react-native-community/netinfo": ">=9.4.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.0.0",
+    "@types/react-native": "^0.72.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.0.0"
+  },
+  "keywords": [
+    "erebor",
+    "react-native",
+    "wallet",
+    "ethereum",
+    "self-custodial",
+    "crypto",
+    "blockchain",
+    "mobile",
+    "expo"
+  ],
+  "author": "Erebor Team",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/erebor/sdk.git",
+    "directory": "sdks/react-native"
+  },
+  "bugs": {
+    "url": "https://github.com/erebor/sdk/issues"
+  },
+  "homepage": "https://erebor.xyz"
+}
