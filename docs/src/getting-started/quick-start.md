@@ -19,7 +19,7 @@ curl http://localhost:8080/health
 # {"status":"ok","version":"0.1.0"}
 ```
 
-## Authenticate a User
+## Complete Auth → Wallet → Sign Flow
 
 ### 1. Send an Email OTP
 
@@ -30,7 +30,7 @@ curl -X POST http://localhost:8080/auth/email/send-otp \
 # {"message":"OTP sent"}
 ```
 
-### 2. Verify the OTP
+### 2. Verify the OTP and Get Tokens
 
 ```bash
 curl -X POST http://localhost:8080/auth/email/verify \
@@ -38,7 +38,7 @@ curl -X POST http://localhost:8080/auth/email/verify \
   -d '{"email": "user@example.com", "code": "123456"}'
 ```
 
-Response:
+Response (save the access_token):
 
 ```json
 {
@@ -48,12 +48,91 @@ Response:
 }
 ```
 
-### 3. Use the Access Token
+### 3. Create an Embedded Wallet
+
+```bash
+ACCESS_TOKEN="eyJhbGciOiJIUzI1NiJ9..."
+
+curl -X POST http://localhost:8080/wallets \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"name": "My Main Wallet"}'
+```
+
+Response (save the wallet_id and ethereum_address):
+
+```json
+{
+  "wallet_id": "wallet-123-abc",
+  "ethereum_address": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+  "share_indices": [1, 2, 3],
+  "created_at": "2026-02-17T00:00:00Z"
+}
+```
+
+### 4. Sign a Message
+
+```bash
+WALLET_ID="wallet-123-abc"
+
+curl -X POST http://localhost:8080/wallets/$WALLET_ID/sign-message \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Hello, Erebor!",
+    "share_indices": [1, 2]
+  }'
+```
+
+Response:
+
+```json
+{
+  "signature": "0x1b2e4f7a8c9d3e6f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e",
+  "message_hash": "0x7b5c3d8e1f2a4b6c9d0e3f5a7b8c1d4e6f9a2b5c8d0e3f6a9b2c5d8e1f4a7b0c3d6e9f2a5b8c1d4e7f0a3b6c9d2e5f8",
+  "recovery_id": 27
+}
+```
+
+### 5. Send a Transaction
+
+```bash
+curl -X POST http://localhost:8080/wallets/$WALLET_ID/send-transaction \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "to": "0x1234567890abcdef1234567890abcdef12345678",
+    "value": "1000000000000000000",
+    "data": "0x",
+    "gas_limit": 21000,
+    "gas_price": "20000000000",
+    "share_indices": [1, 2]
+  }'
+```
+
+Response:
+
+```json
+{
+  "transaction_hash": "0xabc123def456...",
+  "status": "pending",
+  "gas_used": null,
+  "block_number": null
+}
+```
+
+That's it! You've authenticated a user, created their embedded wallet, and signed a transaction — all via REST API calls.
+
+### Additional Operations
 
 ```bash
 # Get current user info
 curl http://localhost:8080/auth/me \
-  -H "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9..."
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# List user's wallets
+curl http://localhost:8080/wallets \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
 
 # Refresh when the access token expires (15 min)
 curl -X POST http://localhost:8080/auth/refresh \

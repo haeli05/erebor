@@ -2,8 +2,6 @@
 
 The `erebor-aa` crate provides ERC-4337 account abstraction — smart contract wallets with gasless transactions, session keys, and programmable permissions.
 
-> **Status:** 🚧 Planned — module structure and interfaces are defined; implementation is in progress.
-
 ## What Account Abstraction Enables
 
 | Feature | EOA (Raw Key) | Smart Account (AA) |
@@ -59,14 +57,31 @@ The `erebor-aa` crate provides ERC-4337 account abstraction — smart contract w
 4. EntryPoint validates each UserOp via the account's `validateUserOp`
 5. If a paymaster is specified, it pays for gas
 
-## Planned Module Structure
+## Module Structure
 
 ```
 erebor-aa/src/
+├── lib.rs          # AAService - main API
 ├── bundler.rs      # UserOperation mempool + bundling
-├── paymaster.rs    # Gas sponsorship strategies
-├── wallet.rs       # Smart account factory + deployment
-└── lib.rs
+├── paymaster.rs    # Gas sponsorship strategies (verifying, sponsored, ERC-20)
+└── wallet.rs       # Smart account factory + deployment + session keys
+```
+
+The top-level `AAService` coordinates all modules:
+
+```rust
+pub struct AAService {
+    pub bundler: Bundler,
+    pub paymaster: Arc<dyn Paymaster>,
+    pub session_keys: SessionKeyManager,
+    pub account_factory: AccountFactory,
+}
+
+impl AAService {
+    pub fn submit_user_op(&self, op: UserOperation, expected_min_nonce: u64) -> Result<[u8; 32], AAError>;
+    pub fn create_bundle(&self) -> Bundle;
+    pub fn compute_account_address(&self, owner: &[u8; 20], salt: u64) -> [u8; 20];
+}
 ```
 
 ## Bundler
@@ -75,17 +90,23 @@ The bundler manages a mempool of `UserOperation` structs and submits them to the
 
 ```rust
 pub struct UserOperation {
-    pub sender: Address,
-    pub nonce: U256,
-    pub init_code: Bytes,        // Factory call for new accounts
-    pub call_data: Bytes,        // Account.execute(...) payload
-    pub call_gas_limit: U256,
-    pub verification_gas: U256,
-    pub pre_verification_gas: U256,
-    pub max_fee_per_gas: U256,
-    pub max_priority_fee: U256,
-    pub paymaster_and_data: Bytes,
-    pub signature: Bytes,
+    pub sender: [u8; 20],
+    pub nonce: u64,
+    pub init_code: Vec<u8>,              // Factory call for new accounts
+    pub call_data: Vec<u8>,              // Account.execute(...) payload
+    pub call_gas_limit: u64,
+    pub verification_gas_limit: u64,
+    pub pre_verification_gas: u64,
+    pub max_fee_per_gas: u128,
+    pub max_priority_fee_per_gas: u128,
+    pub paymaster_and_data: Vec<u8>,
+    pub signature: Vec<u8>,
+}
+
+impl UserOperation {
+    pub fn hash(&self, entry_point: &[u8; 20], chain_id: u64) -> [u8; 32];
+    pub fn total_gas(&self) -> u64;
+    pub fn max_cost(&self) -> u128;
 }
 ```
 

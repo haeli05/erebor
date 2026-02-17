@@ -178,6 +178,120 @@ curl -X POST http://localhost:8080/auth/email/verify \
 # }
 ```
 
+## API Reference
+
+Complete REST API reference for all endpoints:
+
+### Public Endpoints (No Auth Required)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/` | API info and version |
+| `GET` | `/health` | Health check |
+| `POST` | `/auth/google` | Google OAuth login |
+| `POST` | `/auth/email/send-otp` | Send email OTP |
+| `POST` | `/auth/email/verify` | Verify email OTP and get tokens |
+| `POST` | `/auth/siwe/nonce` | Get SIWE nonce |
+| `POST` | `/auth/siwe/verify` | Verify SIWE signature and get tokens |
+| `POST` | `/auth/refresh` | Refresh access token |
+
+### Protected Endpoints (JWT Required)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/auth/me` | Get current user info and linked identities |
+| `POST` | `/auth/logout` | Revoke current session |
+| `POST` | `/auth/link` | Link additional auth provider to account |
+| `DELETE` | `/auth/link/:provider` | Unlink auth provider from account |
+| `POST` | `/wallets` | Create new embedded wallet |
+| `GET` | `/wallets` | List user's wallets |
+| `GET` | `/wallets/:id` | Get wallet details |
+| `POST` | `/wallets/:id/sign-message` | Sign arbitrary message |
+| `POST` | `/wallets/:id/sign-transaction` | Sign transaction (returns signature) |
+| `POST` | `/wallets/:id/send-transaction` | Sign and broadcast transaction |
+
+## Project Structure
+
+```
+erebor/
+├── crates/                      # Rust workspace crates
+│   ├── erebor-common/          # Shared types, errors, utilities
+│   │   ├── src/
+│   │   │   ├── types.rs        # Core types (UserId, SecretBytes)
+│   │   │   ├── error.rs        # Common error types
+│   │   │   └── lib.rs          # Public API
+│   │   └── Cargo.toml
+│   │
+│   ├── erebor-auth/            # Authentication & session management
+│   │   ├── src/
+│   │   │   ├── providers.rs    # OAuth, Email OTP, SIWE, Passkey
+│   │   │   ├── jwt.rs          # JWT token handling
+│   │   │   ├── session.rs      # Session management with rotation
+│   │   │   ├── linking.rs      # Multi-provider identity linking
+│   │   │   ├── middleware.rs   # Auth & rate limiting middleware
+│   │   │   └── lib.rs          # Public API
+│   │   └── Cargo.toml
+│   │
+│   ├── erebor-vault/           # Key vault with Shamir secret sharing
+│   │   ├── src/
+│   │   │   ├── shamir.rs       # Shamir 2-of-3 implementation
+│   │   │   ├── encryption.rs   # AES-256-GCM envelope encryption
+│   │   │   ├── key_derivation.rs # BIP-32/44 HD key derivation
+│   │   │   ├── storage.rs      # Key storage interface & in-memory impl
+│   │   │   └── lib.rs          # VaultService API
+│   │   └── Cargo.toml
+│   │
+│   ├── erebor-chain/           # Multi-chain RPC & transaction handling
+│   │   ├── src/
+│   │   │   ├── lib.rs          # ChainService API
+│   │   │   ├── gas.rs          # EIP-1559 & legacy gas estimation
+│   │   │   ├── tx.rs           # Transaction building & signing
+│   │   │   ├── signer.rs       # Multi-curve signing (secp256k1, Ed25519)
+│   │   │   └── broadcast.rs    # RPC pooling & failover
+│   │   └── Cargo.toml
+│   │
+│   ├── erebor-aa/              # ERC-4337 Account Abstraction
+│   │   ├── src/
+│   │   │   ├── lib.rs          # Account abstraction API
+│   │   │   ├── bundler.rs      # ERC-4337 bundler
+│   │   │   ├── paymaster.rs    # Paymaster types (verifying, sponsored, ERC-20)
+│   │   │   ├── smart_wallet.rs # Smart contract wallet management
+│   │   │   └── session.rs      # Session keys with spending limits
+│   │   └── Cargo.toml
+│   │
+│   ├── erebor-gateway/         # HTTP API gateway
+│   │   ├── src/
+│   │   │   ├── main.rs         # Server startup & middleware
+│   │   │   ├── state.rs        # Application state management
+│   │   │   ├── error.rs        # API error handling
+│   │   │   ├── auth.rs         # JWT middleware
+│   │   │   └── routes/
+│   │   │       ├── mod.rs      # Route module exports
+│   │   │       ├── auth.rs     # Authentication endpoints
+│   │   │       └── wallets.rs  # Wallet & signing endpoints
+│   │   └── Cargo.toml
+│   │
+│   └── erebor-tests/           # Integration tests
+│       ├── tests/              # End-to-end test scenarios
+│       └── Cargo.toml
+│
+├── docs/                       # Documentation (mdBook)
+│   ├── book.toml              # mdBook configuration
+│   └── src/                   # Markdown source files
+│       ├── SUMMARY.md         # Documentation structure
+│       ├── architecture/      # Architecture deep-dives
+│       ├── guides/           # Setup & deployment guides
+│       ├── sdk/              # SDK documentation
+│       └── getting-started/   # Quick start guides
+│
+├── Cargo.toml                 # Workspace configuration
+├── Cargo.lock                 # Dependency lock file
+├── docker-compose.yml         # Local development setup
+├── Dockerfile                 # Container build
+├── README.md                  # This file
+└── LICENSE                   # MIT license
+```
+
 ## Configuration
 
 Erebor is configured via environment variables:

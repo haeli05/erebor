@@ -3,7 +3,7 @@ use erebor_auth::{
     jwt::JwtManager,
     session::{SessionManager, InMemorySessionStore},
     linking::{LinkingManager, InMemoryLinkingStore},
-    providers::{ProviderRegistry, EmailOtpProvider, SiweProvider}
+    providers::{ProviderRegistry, EmailOtpProvider, PhoneOtpProvider, SiweProvider, FarcasterProvider, TelegramAuthProvider}
 };
 use erebor_vault::{VaultService, ShamirVault, EncryptionService, InMemoryStore};
 use erebor_chain::ChainService;
@@ -37,8 +37,22 @@ impl AppState {
 
         // Auth providers
         let email_otp = EmailOtpProvider::new();
+        let phone_otp = PhoneOtpProvider::new();
         let siwe = SiweProvider::new("erebor.local".into());
-        let providers = Arc::new(ProviderRegistry::new(email_otp, siwe, None));
+        let farcaster = FarcasterProvider::new("erebor".into(), "http://localhost:8080".into());
+        let telegram = TelegramAuthProvider::new("erebor".into(), "bot-token".into());
+        let providers = Arc::new(ProviderRegistry::new(
+            email_otp, 
+            phone_otp,
+            siwe, 
+            farcaster,
+            telegram,
+            None, // google
+            None, // apple
+            None, // twitter
+            None, // discord
+            None, // github
+        ));
 
         // Vault service (2-of-3 Shamir)
         let shamir = ShamirVault::new(2, 3)
@@ -71,8 +85,22 @@ impl AppState {
         let linking = Arc::new(LinkingManager::new(linking_store));
 
         let email_otp = EmailOtpProvider::new();
+        let phone_otp = PhoneOtpProvider::new();
         let siwe = SiweProvider::new("erebor.local".into());
-        let providers = Arc::new(ProviderRegistry::new(email_otp, siwe, None));
+        let farcaster = FarcasterProvider::new("erebor".into(), "http://localhost:8080".into());
+        let telegram = TelegramAuthProvider::new("erebor".into(), "bot-token".into());
+        let providers = Arc::new(ProviderRegistry::new(
+            email_otp, 
+            phone_otp,
+            siwe, 
+            farcaster,
+            telegram,
+            None, // google
+            None, // apple
+            None, // twitter
+            None, // discord
+            None, // github
+        ));
 
         let shamir = ShamirVault::new(2, 3)
             .map_err(|e| EreborError::VaultError(e.to_string()))?;

@@ -264,6 +264,170 @@ Unlink an authentication method. Must keep at least one linked identity.
 
 ---
 
+## Wallet Endpoints
+
+### `POST /wallets` 🔒
+
+Create a new embedded wallet for the authenticated user.
+
+**Headers:** `Authorization: Bearer <access_token>`
+
+**Request:**
+```json
+{
+  "name": "My Main Wallet"
+}
+```
+
+**Response (200):**
+```json
+{
+  "wallet_id": "wallet-123-abc",
+  "ethereum_address": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+  "share_indices": [1, 2, 3],
+  "created_at": "2026-02-17T00:00:00Z"
+}
+```
+
+---
+
+### `GET /wallets` 🔒
+
+List all wallets for the authenticated user.
+
+**Headers:** `Authorization: Bearer <access_token>`
+
+**Response (200):**
+```json
+{
+  "wallets": [
+    {
+      "wallet_id": "wallet-123-abc",
+      "ethereum_address": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+      "share_count": 3,
+      "created_at": "2026-02-17T00:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+### `GET /wallets/:id` 🔒
+
+Get details for a specific wallet.
+
+**Headers:** `Authorization: Bearer <access_token>`
+
+**Response (200):**
+```json
+{
+  "wallet_id": "wallet-123-abc",
+  "ethereum_address": "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf",
+  "share_indices": [1, 2, 3],
+  "created_at": "2026-02-17T00:00:00Z"
+}
+```
+
+**Errors:**
+- `404` — Wallet not found or not owned by user
+
+---
+
+### `POST /wallets/:id/sign-message` 🔒
+
+Sign an arbitrary message with the wallet's private key.
+
+**Headers:** `Authorization: Bearer <access_token>`
+
+**Request:**
+```json
+{
+  "message": "Hello, Erebor!",
+  "share_indices": [1, 2]
+}
+```
+
+**Response (200):**
+```json
+{
+  "signature": "0x1b2e4f...",
+  "message_hash": "0x7b5c3d...",
+  "recovery_id": 27
+}
+```
+
+**Errors:**
+- `400` — Insufficient shares (need at least 2 of 3)
+- `404` — Wallet not found
+
+---
+
+### `POST /wallets/:id/sign-transaction` 🔒
+
+Sign a transaction (returns signature without broadcasting).
+
+**Headers:** `Authorization: Bearer <access_token>`
+
+**Request:**
+```json
+{
+  "to": "0x1234567890abcdef1234567890abcdef12345678",
+  "value": "1000000000000000000",
+  "data": "0x",
+  "gas_limit": 21000,
+  "max_fee_per_gas": "30000000000",
+  "max_priority_fee_per_gas": "1500000000",
+  "nonce": 42,
+  "share_indices": [1, 2]
+}
+```
+
+**Response (200):**
+```json
+{
+  "signature": "0xr=1b2e4f...,s=3a5c7d...,v=27",
+  "transaction_hash": "0xabc123...",
+  "signed_transaction": "0x02f86c..."
+}
+```
+
+---
+
+### `POST /wallets/:id/send-transaction` 🔒
+
+Sign and broadcast a transaction to the network.
+
+**Headers:** `Authorization: Bearer <access_token>`
+
+**Request:**
+```json
+{
+  "to": "0x1234567890abcdef1234567890abcdef12345678",
+  "value": "1000000000000000000",
+  "data": "0x",
+  "gas_limit": 21000,
+  "gas_price": "20000000000",
+  "share_indices": [1, 2]
+}
+```
+
+**Response (200):**
+```json
+{
+  "transaction_hash": "0xabc123def456...",
+  "status": "pending",
+  "gas_used": null,
+  "block_number": null
+}
+```
+
+**Errors:**
+- `400` — Invalid transaction parameters
+- `500` — RPC error or broadcast failure
+
+---
+
 ## Error Format
 
 All errors return a JSON body with a message:

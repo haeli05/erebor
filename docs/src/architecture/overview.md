@@ -50,13 +50,25 @@ The critical security module. Manages private keys such that no single compromis
 - **Storage** — Pluggable backend (in-memory for dev, PostgreSQL for production)
 - **Audit** — Immutable log of every key operation
 
-### Account Abstraction (`erebor-aa`) *(Planned)*
+### Account Abstraction (`erebor-aa`)
 
 Wraps EOA wallets in ERC-4337 smart contract accounts enabling gasless transactions, session keys, and spending limits.
 
-### Chain Service (`erebor-chain`) *(Planned)*
+**Key components:**
+- **Bundler** — ERC-4337 UserOperation bundling and submission
+- **Paymaster** — Gas sponsorship (verifying, sponsored, ERC-20 paymasters)
+- **Smart Wallets** — Factory deployment and management
+- **Session Keys** — Scoped permissions with spending limits
 
-Abstracts multi-chain complexity — RPC connection pooling, gas estimation, event indexing.
+### Chain Service (`erebor-chain`)
+
+Abstracts multi-chain complexity — RPC connection pooling, gas estimation, transaction broadcasting.
+
+**Key components:**
+- **Gas Estimation** — EIP-1559 and legacy gas oracles with safety margins
+- **RPC Pool** — Multi-provider connection pooling with health tracking and failover
+- **Transaction Pipeline** — Nonce management, signing, and broadcasting
+- **Chain Registry** — Configuration for EVM chains (Ethereum, Base, Polygon, Arbitrum, Optimism) and Solana
 
 ## Request Flow
 
